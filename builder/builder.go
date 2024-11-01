@@ -614,7 +614,7 @@ func (b *Builder) OnPayloadAttribute(attrs *types.BuilderPayloadAttributes) erro
 			// Verify signature against the public key
 			valid, err := delegation.VerifySignature(pubkey, b.GetConstraintsDomain())
 			if err != nil || !valid {
-				log.Error("could not verify signature", "err", err)
+				log.Error("could not verify delegation signature", "err", err, "valid", valid)
 				continue
 			}
 
