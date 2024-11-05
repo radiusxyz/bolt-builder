@@ -496,7 +496,7 @@ func (b *Builder) onSealedBlock(opts SubmitBlockOpts) error {
 		// NOTE: we can ignore constraints for `processBuiltBlock`
 		go b.processBuiltBlock(opts.Block, opts.BlockValue, opts.OrdersClosedAt, opts.SealedAt, opts.CommitedBundles, opts.AllBundles, opts.UsedSbundles, &blockBidMsg)
 		if versionedBlockRequestWithConstraintProofs != nil {
-			log.Info(fmt.Sprintf("[BOLT]: Sending sealed block to relay %s", versionedBlockRequestWithConstraintProofs))
+			log.Info(fmt.Sprintf("[BOLT]: Sending sealed block %d with proofs to relay", opts.Block.Number()))
 			err = b.relay.SubmitBlockWithProofs(versionedBlockRequestWithConstraintProofs, opts.ValidatorData)
 		} else if len(constraints) == 0 {
 			// If versionedBlockRequestWithConstraintsProofs is nil and no constraints, then we don't have proofs to send
