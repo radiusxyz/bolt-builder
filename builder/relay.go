@@ -141,6 +141,7 @@ func (r *RemoteRelay) GetDelegationsForSlot(nextSlot uint64) (types.SignedDelega
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
+	log.Info("getting delegations for slot", nextSlot, "endpoint", endpoint)
 	var dst types.SignedDelegations
 	code, err := SendHTTPRequest(ctx, *http.DefaultClient, http.MethodGet, endpoint, nil, &dst)
 	if err != nil {
@@ -152,7 +153,6 @@ func (r *RemoteRelay) GetDelegationsForSlot(nextSlot uint64) (types.SignedDelega
 	}
 
 	return dst, nil
-
 }
 
 func (r *RemoteRelay) Start() error {

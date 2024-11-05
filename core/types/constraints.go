@@ -21,10 +21,8 @@ import (
 	"github.com/flashbots/go-boost-utils/bls"
 )
 
-var (
-	// ConstraintsDomainType is the expected signing domain mask for constraints-API related messages
-	ConstraintsDomainType = phase0.DomainType([4]byte{109, 109, 111, 67})
-)
+// ConstraintsDomainType is the expected signing domain mask for constraints-API related messages
+var ConstraintsDomainType = phase0.DomainType([4]byte{109, 109, 111, 67})
 
 // NOTE: given that it uses `common.Hash`, `Transaction` and it's used in both
 // the builder package and the miner package, here it's a good place for now
@@ -252,7 +250,6 @@ func (c *SignedConstraints) Digest() []byte {
 
 	for _, tx := range c.Message.Transactions {
 		hasher.Write(tx.Hash().Bytes())
-
 	}
 
 	return hasher.Sum(nil)
@@ -279,6 +276,7 @@ type SignedDelegation struct {
 }
 
 type Delegation struct {
+	Action          uint8            `json:"action"`
 	ValidatorPubkey phase0.BLSPubKey `json:"validator_pubkey"`
 	DelegateePubkey phase0.BLSPubKey `json:"delegatee_pubkey"`
 }
@@ -287,6 +285,7 @@ type Delegation struct {
 func (d *SignedDelegation) Digest() []byte {
 	hasher := sha256.New()
 	// NOTE: ignoring errors here
+	hasher.Write([]byte{d.Message.Action})
 	hasher.Write(d.Message.ValidatorPubkey[:])
 	hasher.Write(d.Message.DelegateePubkey[:])
 	return hasher.Sum(nil)
