@@ -438,7 +438,7 @@ func TestSubscribeProposerConstraints(t *testing.T) {
 	_, ok := builder.constraintsCache.Get(0)
 	require.Equal(t, false, ok)
 
-	builder.subscribeToRelayForConstraints(builder.relay.Config().Endpoint)
+	go builder.subscribeToRelayForConstraints(builder.relay.Config().Endpoint)
 	// Wait 2 seconds to save all constraints in cache
 	time.Sleep(2 * time.Second)
 
