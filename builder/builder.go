@@ -286,10 +286,10 @@ func (b *Builder) subscribeToRelayForConstraints(relayBaseEndpoint string) error
 
 	// Main loop to reconnect to the relay
 	for {
-		log.Info("Attempting to subscribe to constraints...")
+		log.Info("Attempting to subscribe to constraints...", "relayBaseEndpoint", relayBaseEndpoint)
 
 		if attempts >= maxAttempts {
-			log.Error(fmt.Sprintf("Failed to subscribe to constraints after %d attempts", maxAttempts))
+			log.Error(fmt.Sprintf("Failed to subscribe to constraints after %d attempts", maxAttempts), "relayBaseEndpoint", relayBaseEndpoint)
 			return errors.New("failed to subscribe to constraints")
 		}
 
@@ -303,14 +303,14 @@ func (b *Builder) subscribeToRelayForConstraints(relayBaseEndpoint string) error
 
 		resp, err := client.Do(req)
 		if err != nil {
-			log.Error(fmt.Sprintf("Failed to connect to SSE server: %v", err))
+			log.Error(fmt.Sprintf("Failed to connect to SSE server: %v", err), "relayBaseEndpoint", relayBaseEndpoint)
 			time.Sleep(retryInterval)
 			attempts++
 			continue
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			log.Error(fmt.Sprintf("Error subscribing to constraints via SSE: %s, %v", resp.Status, err))
+			log.Error(fmt.Sprintf("Error subscribing to constraints via SSE: %s, %v", resp.Status, err), "relayBaseEndpoint", relayBaseEndpoint)
 			resp.Body.Close() // Close response body to free resources
 			time.Sleep(retryInterval)
 			attempts++
@@ -341,7 +341,7 @@ func (b *Builder) subscribeToRelayForConstraints(relayBaseEndpoint string) error
 				// If we encounter an EOF or another serious error, break out to reconnect
 				isEOF := err == io.EOF || strings.Contains(err.Error(), "EOF")
 				if isEOF {
-					log.Error("Encountered EOF. Connection to relay lost, attempting to reconnect...")
+					log.Error("Encountered EOF. Connection to relay lost, attempting to reconnect...", "relayBaseEndpoint", relayBaseEndpoint)
 					time.Sleep(retryInterval)
 					break // Break to reconnect by restarting the main `for` loop
 				}
