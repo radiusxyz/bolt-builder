@@ -277,7 +277,7 @@ func (b *Builder) SubscribeProposerConstraints() error {
 
 // subscribeToRelayForConstraints loops almost indefinitely to subscribe to
 // constraints forwarded by relays. If the subscription fails or it is lost, it
-// retries every 10 seconds for a max of 10 minutes the restablish the
+// retries every 10 seconds for a max of 10 minutes to restablish the
 // connection before existing.
 func (b *Builder) subscribeToRelayForConstraints(relayBaseEndpoint string) error {
 	attempts := 0
