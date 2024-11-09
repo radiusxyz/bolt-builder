@@ -1616,7 +1616,7 @@ func SetBuilderConfig(ctx *cli.Context, cfg *builder.Config) {
 	cfg.SecondsInSlot = ctx.Uint64(BuilderSecondsInSlot.Name)
 	cfg.DisableBundleFetcher = ctx.IsSet(BuilderDisableBundleFetcher.Name)
 	cfg.DryRun = ctx.IsSet(BuilderDryRun.Name)
-	cfg.VerifyConstraints = ctx.IsSet(BuilderVerifyConstraints.Name)
+	cfg.VerifyConstraints = ctx.Bool(BuilderVerifyConstraints.Name)
 	cfg.IgnoreLatePayloadAttributes = ctx.IsSet(BuilderIgnoreLatePayloadAttributes.Name)
 	cfg.BuilderSecretKey = ctx.String(BuilderSecretKey.Name)
 	cfg.RelaySecretKey = ctx.String(BuilderRelaySecretKey.Name)
