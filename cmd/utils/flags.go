@@ -635,6 +635,7 @@ var (
 	BuilderVerifyConstraints = &cli.BoolFlag{
 		Name:     "builder.verify_constraints",
 		Usage:    "Verify signatures on incoming constraints",
+		Value:    true,
 		Category: flags.BuilderCategory,
 	}
 	BuilderBlockValidationBlacklistSourceFilePath = &cli.StringFlag{
