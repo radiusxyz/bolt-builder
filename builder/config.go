@@ -30,6 +30,7 @@ type Config struct {
 	DiscardRevertibleTxOnErr         bool          `toml:",omitempty"`
 	EnableCancellations              bool          `toml:",omitempty"`
 	BlockProcessorURL                string        `toml:",omitempty"`
+	VerifyConstraints                bool          `toml:",omitempty"`
 }
 
 // DefaultConfig is the default config for the builder.
@@ -58,6 +59,7 @@ var DefaultConfig = Config{
 	BuilderRateLimitMaxBurst:      RateLimitBurstDefault,
 	DiscardRevertibleTxOnErr:      false,
 	EnableCancellations:           false,
+	VerifyConstraints:             true,
 }
 
 // RelayConfig is the config for a single remote relay.

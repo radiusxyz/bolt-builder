@@ -88,6 +88,7 @@ type Builder struct {
 	relay                       IRelay
 	eth                         IEthereumService
 	dryRun                      bool
+	verifyConstraints           bool
 	ignoreLatePayloadAttributes bool
 	validator                   *blockvalidation.BlockValidationAPI
 	beaconClient                IBeaconClient
@@ -123,6 +124,7 @@ type BuilderArgs struct {
 	discardRevertibleTxOnErr      bool
 	eth                           IEthereumService
 	dryRun                        bool
+	verifyConstraints             bool
 	ignoreLatePayloadAttributes   bool
 	validator                     *blockvalidation.BlockValidationAPI
 	beaconClient                  IBeaconClient
@@ -189,6 +191,7 @@ func NewBuilder(args BuilderArgs) (*Builder, error) {
 		relay:                         args.relay,
 		eth:                           args.eth,
 		dryRun:                        args.dryRun,
+		verifyConstraints:             args.verifyConstraints,
 		ignoreLatePayloadAttributes:   args.ignoreLatePayloadAttributes,
 		validator:                     args.validator,
 		beaconClient:                  args.beaconClient,
@@ -286,7 +289,7 @@ func (b *Builder) subscribeToRelayForConstraints(relayBaseEndpoint string) error
 
 	// Main loop to reconnect to the relay
 	for {
-		log.Info("Attempting to subscribe to constraints...", "relayBaseEndpoint", relayBaseEndpoint)
+		log.Info("Attempting to subscribe to constraints...", "relayBaseEndpoint", relayBaseEndpoint, "verifyConstertraints", b.verifyConstraints)
 
 		if attempts >= maxAttempts {
 			log.Error(fmt.Sprintf("Failed to subscribe to constraints after %d attempts", maxAttempts), "relayBaseEndpoint", relayBaseEndpoint)
@@ -376,10 +379,12 @@ func (b *Builder) subscribeToRelayForConstraints(relayBaseEndpoint string) error
 					continue
 				}
 
-				valid, err := constraint.VerifySignature(constraint.Message.Pubkey, b.GetConstraintsDomain())
-				if err != nil || !valid {
-					log.Error("Failed to verify constraint signature", "err", err)
-					continue
+				if b.verifyConstraints {
+					valid, err := constraint.VerifySignature(constraint.Message.Pubkey, b.GetConstraintsDomain())
+					if err != nil || !valid {
+						log.Error("Failed to verify constraint signature", "err", err)
+						continue
+					}
 				}
 
 				decodedConstraints, err := DecodeConstraints(constraint)
