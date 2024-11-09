@@ -632,6 +632,11 @@ var (
 		Usage:    "Enable the validator checks",
 		Category: flags.BuilderCategory,
 	}
+	BuilderVerifyConstraints = &cli.BoolFlag{
+		Name:     "builder.verify_constraints",
+		Usage:    "Verify signatures on incoming constraints",
+		Category: flags.BuilderCategory,
+	}
 	BuilderBlockValidationBlacklistSourceFilePath = &cli.StringFlag{
 		Name: "builder.blacklist",
 		Usage: "Path to file containing blacklisted addresses, json-encoded list of strings. " +
@@ -1610,6 +1615,7 @@ func SetBuilderConfig(ctx *cli.Context, cfg *builder.Config) {
 	cfg.SecondsInSlot = ctx.Uint64(BuilderSecondsInSlot.Name)
 	cfg.DisableBundleFetcher = ctx.IsSet(BuilderDisableBundleFetcher.Name)
 	cfg.DryRun = ctx.IsSet(BuilderDryRun.Name)
+	cfg.VerifyConstraints = ctx.IsSet(BuilderVerifyConstraints.Name)
 	cfg.IgnoreLatePayloadAttributes = ctx.IsSet(BuilderIgnoreLatePayloadAttributes.Name)
 	cfg.BuilderSecretKey = ctx.String(BuilderSecretKey.Name)
 	cfg.RelaySecretKey = ctx.String(BuilderRelaySecretKey.Name)
