@@ -100,6 +100,10 @@ type Builder struct {
 
 	// constraintsCache is a map from slot to the decoded constraints made by proposers
 	constraintsCache *shardmap.FIFOMap[uint64, types.HashToConstraintDecoded]
+	// NOTE: `shardmap` already provides locks, however for handling multiple
+	// relay subscriptions for constraints we need a lock to protect the cache
+	// between the `Get` and `Put` operation
+	updateConstraintsCacheLock sync.Mutex
 
 	limiter                       *rate.Limiter
 	submissionOffsetFromEndOfSlot time.Duration
@@ -392,10 +396,13 @@ func (b *Builder) subscribeToRelayForConstraints(relayBaseEndpoint string) error
 					log.Error("Failed to decode constraint: ", err)
 					continue
 				}
-
+				// Take the lock to update the constraints cache: both `Get` and `Put` must be done by the same entity
+				b.updateConstraintsCacheLock.Lock()
+				// For every constraint, we need to check if it has already been seen for the associated slot
 				slotConstraints, _ := b.constraintsCache.Get(constraint.Message.Slot)
 				if len(slotConstraints) == 0 {
 					b.constraintsCache.Put(constraint.Message.Slot, decodedConstraints)
+					b.updateConstraintsCacheLock.Unlock()
 					continue
 				}
 
@@ -406,6 +413,7 @@ func (b *Builder) subscribeToRelayForConstraints(relayBaseEndpoint string) error
 				}
 
 				b.constraintsCache.Put(constraint.Message.Slot, slotConstraints)
+				b.updateConstraintsCacheLock.Unlock()
 			}
 		}
 	}
