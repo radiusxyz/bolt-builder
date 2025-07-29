@@ -529,9 +529,9 @@ func sseConstraintsHandler(w http.ResponseWriter, r *http.Request) {
 // generateMockConstraintsForSlot generates a list of constraints for a given slot
 func generateMockConstraintsForSlot(slot uint64) types.SignedConstraintsList {
 	rawTx := new(types.Transaction)
-	err := rawTx.UnmarshalBinary(common.Hex2Bytes("0x02f876018305da308401312d0085041f1196d2825208940c598786c88883ff5e4f461750fad64d3fae54268804b7ec32d7a2000080c080a0086f02eacec72820be3b117e1edd5bd7ed8956964b28b2d903d2cba53dd13560a06d61ec9ccce6acb31bf21878b9a844e7fdac860c5b7d684f7eb5f38a5945357c"))
-	if err != nil {
-		fmt.Println("Failed to unmarshal rawTx: ", err)
+	err := rawTx.UnmarshalBinary(common.Hex2Bytes("02f87601836384348477359400850517683ba883019a28943678fce4028b6745eb04fa010d9c8e4b36d6288c872b0f1366ad800080c080a0b6b7aba1954160d081b2c8612e039518b9c46cd7df838b405a03f927ad196158a071d2fb6813e5b5184def6bd90fb5f29e0c52671dea433a7decb289560a58416e"))
+	if err != nil {  
+		panic(fmt.Sprintf("Failed to unmarshal rawTx: %v", err))  
 	}
 
 	return types.SignedConstraintsList{
