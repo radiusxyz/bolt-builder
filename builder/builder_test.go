@@ -484,17 +484,19 @@ func TestDeserializeConstraints(t *testing.T) {
 	err := json.Unmarshal([]byte(jsonStr), &constraints)
 	require.NoError(t, err)
 
-	jsonStr = `{
-		"message": {
-			"pubkey":"0xb3cd9c9e59730c210bf9b76959bf11e20bb05cf47cfefdcaab74bc17c369d6daefe1219c2b94d743ffd27988edf24b90",
-			"slot":183,
-			"top":false,
-			"transactions": [
-				"0xf8678085019dc6838082520894deaddeaddeaddeaddeaddeaddeaddeaddeaddead04808360306ca0fde9bdf8f1a9fefef7538490242afb21a0160cf19f1686c7b9bddb45de973b62a0318411f2c959d3e6a25434f99850a0eaa6beb617f7a2dbc9683dccded7bd4b10"
-			]
-		},
-		"signature": "0xaa8a47c6398d5862b56d1bbb308352c65e57e62b0bfdda39a36db7fff3a256c3c7066b219a15a013aae5303f42b6f07b025f34ed6d899e6172fec20d40c4ffebeb50f5d0b75a303c1cc916574c3e0f29d53b2211d28234f430fffce62b4ee554"
-	}`
+	jsonStr = `[
+		{
+			"message": {
+				"pubkey":"0xb3cd9c9e59730c210bf9b76959bf11e20bb05cf47cfefdcaab74bc17c369d6daefe1219c2b94d743ffd27988edf24b90",
+				"slot":183,
+				"top":false,
+				"transactions": [
+					"0xf8678085019dc6838082520894deaddeaddeaddeaddeaddeaddeaddeaddeaddead04808360306ca0fde9bdf8f1a9fefef7538490242afb21a0160cf19f1686c7b9bddb45de973b62a0318411f2c959d3e6a25434f99850a0eaa6beb617f7a2dbc9683dccded7bd4b10"
+				]
+			},
+			"signature": "0xaa8a47c6398d5862b56d1bbb308352c65e57e62b0bfdda39a36db7fff3a256c3c7066b219a15a013aae5303f42b6f07b025f34ed6d899e6172fec20d40c4ffebeb50f5d0b75a303c1cc916574c3e0f29d53b2211d28234f430fffce62b4ee554"
+		}
+	]`
 
 	err = json.Unmarshal([]byte(jsonStr), &constraints)
 	require.NoError(t, err)
