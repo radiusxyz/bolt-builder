@@ -1,6 +1,7 @@
 package builder
 
 import (
+	"crypto/ecdsa"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/flashbotsextra"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/flashbots/go-boost-utils/bls"
@@ -349,6 +351,697 @@ func TestBlockWithConstraints(t *testing.T) {
 	require.NotNil(t, testRelay.submittedMsgWithProofs)
 }
 
+func TestAccessListExclusionConstraints(t *testing.T) {
+	const (
+		validatorDesiredGasLimit = 30_000_000
+		payloadAttributeGasLimit = 30_000_000
+		parentBlockGasLimit      = 29_000_000
+	)
+
+	// <cite>eth/block-validation/api_test.go:53-57</cite>에서 정의된 테스트 키 사용
+	testKey, _ := crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
+	testAddr := crypto.PubkeyToAddress(testKey.PublicKey)
+
+	// Access List가 있는 트랜잭션 생성 (EIP-2930)
+	accessListTx := types.AccessList{
+		{
+			Address: common.HexToAddress("0x1234567890123456789012345678901234567890"),
+			StorageKeys: []common.Hash{
+				common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000001"),
+				common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000002"),
+			},
+		},
+	}
+
+	// Access List 트랜잭션 생성
+	txData := &types.AccessListTx{
+		ChainID:    big.NewInt(1),
+		Nonce:      0,
+		To:         &common.Address{0x16},
+		Value:      big.NewInt(10),
+		Gas:        21000,
+		GasPrice:   big.NewInt(2000000000),
+		AccessList: accessListTx, // 포인터 제거
+	}
+
+	tx := types.NewTx(txData)
+
+	// 트랜잭션 서명
+	signer := types.NewEIP2930Signer(big.NewInt(1))
+	signedTx, err := types.SignTx(tx, signer, testKey)
+	require.NoError(t, err)
+
+	// Block Validation API를 사용하여 Access List 추출 테스트
+	t.Run("ExtractAccessListFromTransaction", func(t *testing.T) {
+		// 트랜잭션에서 Access List 추출
+		extractedAccessList := signedTx.AccessList()
+		require.NotNil(t, extractedAccessList)
+		require.Equal(t, 1, len(extractedAccessList)) // 포인터 역참조 제거
+
+		accessTuple := extractedAccessList[0] // 포인터 역참조 제거
+		require.Equal(t, common.HexToAddress("0x1234567890123456789012345678901234567890"), accessTuple.Address)
+		require.Equal(t, 2, len(accessTuple.StorageKeys))
+
+		t.Logf("Extracted Access List: %+v", extractedAccessList) // 포인터 역참조 제거
+	})
+
+	// Exclusion Constraint 정의 및 테스트
+	t.Run("ExclusionConstraintFiltering", func(t *testing.T) {
+		// Exclusion Constraint 정의 (임시 구조체)
+		type StateScope struct {
+			AccessList types.AccessList `json:"accessList"`
+			LockId     common.Hash      `json:"lockId"`
+		}
+
+		type ExclusionConstraint struct {
+			Type       string     `json:"type"`
+			StateScope StateScope `json:"stateScope"`
+		}
+
+		// 충돌하는 StateScope 정의
+		conflictingStateScope := StateScope{
+			AccessList: types.AccessList{
+				{
+					Address: common.HexToAddress("0x1234567890123456789012345678901234567890"),
+					StorageKeys: []common.Hash{
+						common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000001"),
+					},
+				},
+			},
+			LockId: common.HexToHash("0xabcd1234"),
+		}
+
+		exclusionConstraint := ExclusionConstraint{
+			Type:       "exclusion",
+			StateScope: conflictingStateScope,
+		}
+
+		t.Logf("Exclusion Constraint: %+v", exclusionConstraint)
+
+		// Access List 충돌 검사 함수
+		hasConflict := func(tx *types.Transaction, stateScope StateScope) bool {
+			txAccessList := tx.AccessList()
+			if txAccessList == nil {
+				return false
+			}
+
+			for _, txAccess := range txAccessList { // 포인터 역참조 제거
+				for _, scopeAccess := range stateScope.AccessList {
+					if txAccess.Address == scopeAccess.Address {
+						// 스토리지 키 충돌 검사
+						for _, txKey := range txAccess.StorageKeys {
+							for _, scopeKey := range scopeAccess.StorageKeys {
+								if txKey == scopeKey {
+									return true
+								}
+							}
+						}
+					}
+				}
+			}
+			return false
+		}
+
+		// 충돌 검사 테스트
+		conflict := hasConflict(signedTx, conflictingStateScope)
+		require.True(t, conflict, "Transaction should conflict with exclusion constraint")
+		t.Logf("Conflict detected: %v", conflict)
+
+		// 충돌하지 않는 트랜잭션 생성
+		nonConflictingAccessList := types.AccessList{
+			{
+				Address: common.HexToAddress("0x9876543210987654321098765432109876543210"),
+				StorageKeys: []common.Hash{
+					common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000003"),
+				},
+			},
+		}
+
+		nonConflictingTxData := &types.AccessListTx{
+			ChainID:    big.NewInt(1),
+			Nonce:      1,
+			To:         &common.Address{0x17},
+			Value:      big.NewInt(20),
+			Gas:        21000,
+			GasPrice:   big.NewInt(2000000000),
+			AccessList: nonConflictingAccessList, // 포인터 제거
+		}
+
+		nonConflictingTx := types.NewTx(nonConflictingTxData)
+		signedNonConflictingTx, err := types.SignTx(nonConflictingTx, signer, testKey)
+		require.NoError(t, err)
+
+		noConflict := hasConflict(signedNonConflictingTx, conflictingStateScope)
+		require.False(t, noConflict, "Non-conflicting transaction should not conflict")
+		t.Logf("No conflict detected: %v", !noConflict)
+	})
+
+	// 트랜잭션 풀 필터링 시뮬레이션
+	t.Run("TransactionPoolFiltering", func(t *testing.T) {
+		// 모의 트랜잭션 풀 데이터
+		mockPendingTxs := map[common.Address][]*types.Transaction{
+			testAddr: {signedTx}, // 충돌하는 트랜잭션
+		}
+
+		// Exclusion constraint 기반 필터링 함수
+		filterByExclusionConstraints := func(
+			pending map[common.Address][]*types.Transaction,
+			exclusionConstraints map[common.Hash]types.AccessList,
+		) map[common.Address][]*types.Transaction {
+			filtered := make(map[common.Address][]*types.Transaction)
+
+			for addr, txs := range pending {
+				var validTxs []*types.Transaction
+
+				for _, tx := range txs {
+					hasConflict := false
+					txAccessList := tx.AccessList()
+
+					if txAccessList != nil {
+						for _, exclusionAccessList := range exclusionConstraints {
+							for _, txAccess := range txAccessList { // 포인터 역참조 제거
+								for _, exclusionAccess := range exclusionAccessList {
+									if txAccess.Address == exclusionAccess.Address {
+										// 스토리지 키 충돌 검사
+										for _, txKey := range txAccess.StorageKeys {
+											for _, exclusionKey := range exclusionAccess.StorageKeys {
+												if txKey == exclusionKey {
+													hasConflict = true
+													break
+												}
+											}
+											if hasConflict {
+												break
+											}
+										}
+									}
+									if hasConflict {
+										break
+									}
+								}
+								if hasConflict {
+									break
+								}
+							}
+							if hasConflict {
+								break
+							}
+						}
+					}
+
+					if !hasConflict {
+						validTxs = append(validTxs, tx)
+					}
+				}
+
+				if len(validTxs) > 0 {
+					filtered[addr] = validTxs
+				}
+			}
+
+			return filtered
+		}
+
+		// Exclusion constraints 정의
+		exclusionConstraints := map[common.Hash]types.AccessList{
+			common.HexToHash("0xabcd1234"): {
+				{
+					Address: common.HexToAddress("0x1234567890123456789012345678901234567890"),
+					StorageKeys: []common.Hash{
+						common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000001"),
+					},
+				},
+			},
+		}
+
+		// 필터링 실행
+		filteredTxs := filterByExclusionConstraints(mockPendingTxs, exclusionConstraints)
+
+		// 결과 검증
+		require.Empty(t, filteredTxs, "Conflicting transactions should be filtered out")
+		t.Logf("Original transactions: %d", len(mockPendingTxs[testAddr]))
+		t.Logf("Filtered transactions: %d", len(filteredTxs))
+	})
+}
+
+func TestAccessListExclusionConstraints2(t *testing.T) {
+	t.Log("=== Starting Enhanced Access List Exclusion Constraints Test ===")
+
+	type StateScope struct {
+		AccessList types.AccessList `json:"accessList"`
+		LockId     common.Hash      `json:"lockId"`
+	}
+
+	type ExclusionConstraint struct {
+		Type       string     `json:"type"`
+		StateScope StateScope `json:"stateScope"`
+	}
+
+	// 테스트 키 설정
+	testKey, _ := crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
+	testAddr := crypto.PubkeyToAddress(testKey.PublicKey)
+	signer := types.NewEIP2930Signer(big.NewInt(1))
+
+	// 헬퍼 함수
+	createAccessListTx := func(key *ecdsa.PrivateKey, nonce uint64, address common.Address, storageKeys []common.Hash) *types.Transaction {
+		txData := &types.AccessListTx{
+			ChainID:    big.NewInt(1),
+			Nonce:      nonce,
+			To:         &common.Address{0x16},
+			Value:      big.NewInt(10),
+			Gas:        21000,
+			GasPrice:   big.NewInt(2000000000),
+			AccessList: types.AccessList{{Address: address, StorageKeys: storageKeys}},
+		}
+
+		tx := types.NewTx(txData)
+		signedTx, err := types.SignTx(tx, signer, key)
+		require.NoError(t, err)
+		return signedTx
+	}
+
+	checkAccessListConflict := func(tx *types.Transaction, stateScope StateScope) bool {
+		txAccessList := tx.AccessList()
+		if txAccessList == nil {
+			return false
+		}
+
+		for _, txAccess := range txAccessList {
+			for _, scopeAccess := range stateScope.AccessList {
+				if txAccess.Address == scopeAccess.Address {
+					for _, txKey := range txAccess.StorageKeys {
+						for _, scopeKey := range scopeAccess.StorageKeys {
+							if txKey == scopeKey {
+								return true
+							}
+						}
+					}
+				}
+			}
+		}
+		return false
+	}
+
+	getTotalTxCount := func(txMap map[common.Address][]*types.Transaction) int {
+		total := 0
+		for _, txs := range txMap {
+			total += len(txs)
+		}
+		return total
+	}
+
+	filterByExclusionConstraints := func(
+		pending map[common.Address][]*types.Transaction,
+		exclusionConstraints map[common.Hash]types.AccessList,
+	) map[common.Address][]*types.Transaction {
+		filtered := make(map[common.Address][]*types.Transaction)
+
+		for addr, txs := range pending {
+			var validTxs []*types.Transaction
+
+			for _, tx := range txs {
+				hasConflict := false
+				txAccessList := tx.AccessList()
+
+				if txAccessList != nil {
+					for _, exclusionAccessList := range exclusionConstraints {
+						for _, txAccess := range txAccessList {
+							for _, exclusionAccess := range exclusionAccessList {
+								if txAccess.Address == exclusionAccess.Address {
+									for _, txKey := range txAccess.StorageKeys {
+										for _, exclusionKey := range exclusionAccess.StorageKeys {
+											if txKey == exclusionKey {
+												hasConflict = true
+												break
+											}
+										}
+										if hasConflict {
+											break
+										}
+									}
+								}
+								if hasConflict {
+									break
+								}
+							}
+							if hasConflict {
+								break
+							}
+						}
+						if hasConflict {
+							break
+						}
+					}
+				}
+
+				if !hasConflict {
+					validTxs = append(validTxs, tx)
+				}
+			}
+
+			if len(validTxs) > 0 {
+				filtered[addr] = validTxs
+			}
+		}
+
+		return filtered
+	}
+
+	t.Run("RealisticConstraintScenario", func(t *testing.T) {  
+        t.Log("--- Step 1: Proposer Sets Exclusion Constraint First ---")  
+          
+        // 먼저 proposer가 exclusion constraint를 설정  
+        exclusionStateScope := StateScope{  
+            AccessList: types.AccessList{  
+                {  
+                    Address: common.HexToAddress("0x1234567890123456789012345678901234567890"),  
+                    StorageKeys: []common.Hash{  
+                        common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000001"),  
+                        common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000002"),  
+                    },  
+                },  
+            },  
+            LockId: common.HexToHash("0x1"),  // auction identifier
+        }  
+  
+        exclusionConstraint := ExclusionConstraint{  
+            Type:       "exclusion",  
+            StateScope: exclusionStateScope,  
+        }  
+  
+        t.Logf("Proposer sets Exclusion Constraint:")  
+        t.Logf("  Type: %s", exclusionConstraint.Type)  
+        t.Logf("  LockId: %s", exclusionStateScope.LockId.Hex())  
+        t.Logf("  Protected Address: %s", exclusionStateScope.AccessList[0].Address.Hex())  
+        t.Logf("  Protected Storage Keys:")  
+        for i, key := range exclusionStateScope.AccessList[0].StorageKeys {  
+            t.Logf("    [%d] %s", i, key.Hex())  
+        }  
+  
+        t.Log("--- Step 2: MEV Searchers Submit Bundles ---")  
+          
+        // 이제 MEV searcher들이 번들을 제출 (일부는 충돌, 일부는 충돌하지 않음)  
+          
+        // 1. 충돌하는 트랜잭션 (constraint와 동일한 주소/키 접근)  
+        conflictingTx := createAccessListTx(testKey, 0,  
+            common.HexToAddress("0x1234567890123456789012345678901234567890"),  
+            []common.Hash{  
+                common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000001"), // 충돌!  
+                common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000003"),  
+            })  
+          
+        // 2. 부분적으로 충돌하는 트랜잭션  
+        partialConflictTx := createAccessListTx(testKey, 1,  
+            common.HexToAddress("0x1234567890123456789012345678901234567890"),  
+            []common.Hash{  
+                common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000002"), // 충돌!  
+                common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000004"),  
+            })  
+          
+        // 3. 충돌하지 않는 트랜잭션  
+        nonConflictTx := createAccessListTx(testKey, 2,  
+            common.HexToAddress("0x9876543210987654321098765432109876543210"), // 다른 주소  
+            []common.Hash{  
+                common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000005"),  
+            })  
+  
+        t.Log("MEV Searchers submit the following transactions:")  
+        transactions := []*types.Transaction{conflictingTx, partialConflictTx, nonConflictTx}  
+          
+        for i, tx := range transactions {  
+            t.Logf("  Bundle[%d]: Hash=%s, Nonce=%d", i, tx.Hash().Hex(), tx.Nonce())  
+            accessList := tx.AccessList()  
+            if accessList != nil && len(accessList) > 0 {  
+                for j, entry := range accessList {  
+                    t.Logf("    Access[%d]: Address=%s", j, entry.Address.Hex())  
+                    for k, key := range entry.StorageKeys {  
+                        t.Logf("      Key[%d]: %s", k, key.Hex())  
+                    }  
+                }  
+            }  
+        }  
+  
+        t.Log("--- Step 3: Builder Performs Conflict Detection ---")  
+          
+        // Builder가 constraint와 비교하여 충돌 검사 수행  
+        checkAccessListConflict := func(tx *types.Transaction, stateScope StateScope) bool {  
+            txAccessList := tx.AccessList()  
+            if txAccessList == nil {  
+                return false  
+            }  
+  
+            for _, txAccess := range txAccessList {  
+                for _, scopeAccess := range stateScope.AccessList {  
+                    if txAccess.Address == scopeAccess.Address {  
+                        for _, txKey := range txAccess.StorageKeys {  
+                            for _, scopeKey := range scopeAccess.StorageKeys {  
+                                if txKey == scopeKey {  
+                                    return true  
+                                }  
+                            }  
+                        }  
+                    }  
+                }  
+            }  
+            return false  
+        }  
+  
+        t.Log("Conflict detection results:")  
+        validTransactions := []*types.Transaction{}  
+        rejectedTransactions := []*types.Transaction{}  
+          
+        for i, tx := range transactions {  
+            hasConflict := checkAccessListConflict(tx, exclusionStateScope)  
+            if hasConflict {  
+                rejectedTransactions = append(rejectedTransactions, tx)  
+                t.Logf("  Bundle[%d]: REJECTED (conflicts with constraint)", i)  
+                  
+                // 충돌 상세 분석  
+                txAccessList := tx.AccessList()  
+                for _, txAccess := range txAccessList {  
+                    for _, protectedAccess := range exclusionStateScope.AccessList {  
+                        if txAccess.Address == protectedAccess.Address {  
+                            for _, txKey := range txAccess.StorageKeys {  
+                                for _, protectedKey := range protectedAccess.StorageKeys {  
+                                    if txKey == protectedKey {  
+                                        t.Logf("    Conflict: Address=%s, Key=%s",   
+                                            txAccess.Address.Hex(), txKey.Hex())  
+                                    }  
+                                }  
+                            }  
+                        }  
+                    }  
+                }  
+            } else {  
+                validTransactions = append(validTransactions, tx)  
+                t.Logf("  Bundle[%d]: ACCEPTED (no conflict)", i)  
+            }  
+        }  
+  
+        t.Log("--- Step 4: Final Block Building Results ---")  
+          
+        t.Logf("Summary:")  
+        t.Logf("  Total submitted bundles: %d", len(transactions))  
+        t.Logf("  Accepted bundles: %d", len(validTransactions))  
+        t.Logf("  Rejected bundles: %d", len(rejectedTransactions))  
+          
+        t.Log("Accepted transactions for block inclusion:")  
+        for i, tx := range validTransactions {  
+            t.Logf("  [%d] Hash=%s", i, tx.Hash().Hex())  
+        }  
+          
+        t.Log("Rejected transactions (constraint violations):")  
+        for i, tx := range rejectedTransactions {  
+            t.Logf("  [%d] Hash=%s", i, tx.Hash().Hex())  
+        }  
+  
+        // 검증  
+        require.Equal(t, 1, len(validTransactions), "Only non-conflicting transaction should be accepted")  
+        require.Equal(t, 2, len(rejectedTransactions), "Two conflicting transactions should be rejected")  
+    })  
+
+	// 여러 개의 트랜잭션 생성 (다양한 Access List 패턴)
+	t.Log("Step 1: Creating test transactions with different Access List patterns")
+
+	// 1. 충돌하는 트랜잭션
+	conflictingTx := createAccessListTx(testKey, 0,
+		common.HexToAddress("0x1234567890123456789012345678901234567890"),
+		[]common.Hash{
+			common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000001"),
+			common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000002"),
+		})
+
+	// 2. 부분적으로 충돌하는 트랜잭션
+	partialConflictTx := createAccessListTx(testKey, 1,
+		common.HexToAddress("0x1234567890123456789012345678901234567890"),
+		[]common.Hash{
+			common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000003"),
+			common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000001"), // 충돌
+		})
+
+	// 3. 충돌하지 않는 트랜잭션
+	nonConflictTx := createAccessListTx(testKey, 2,
+		common.HexToAddress("0x9876543210987654321098765432109876543210"),
+		[]common.Hash{
+			common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000005"),
+		})
+
+	t.Run("DetailedTransactionPoolAnalysis", func(t *testing.T) {
+		t.Log("--- Step 2: Current Transaction Pool Contents ---")
+
+		// 모의 트랜잭션 풀 데이터 생성
+		mockPendingTxs := map[common.Address][]*types.Transaction{
+			testAddr: {conflictingTx, partialConflictTx, nonConflictTx},
+		}
+
+		// 현재 TX Pool 내용 출력
+		t.Logf("Transaction Pool contains %d addresses", len(mockPendingTxs))
+		for addr, txs := range mockPendingTxs {
+			t.Logf("Address %s has %d transactions:", addr.Hex(), len(txs))
+			for i, tx := range txs {
+				t.Logf("  Tx[%d]: Hash=%s, Nonce=%d, To=%s",
+					i, tx.Hash().Hex(), tx.Nonce(), tx.To().Hex())
+
+				// Access List 상세 출력
+				accessList := tx.AccessList()
+				if accessList != nil && len(accessList) > 0 {
+					t.Logf("    Access List (%d entries):", len(accessList))
+					for j, entry := range accessList {
+						t.Logf("      [%d] Address: %s", j, entry.Address.Hex())
+						t.Logf("          Storage Keys (%d):", len(entry.StorageKeys))
+						for k, key := range entry.StorageKeys {
+							t.Logf("            [%d] %s", k, key.Hex())
+						}
+					}
+				} else {
+					t.Logf("    No Access List")
+				}
+			}
+		}
+
+		t.Log("--- Step 3: Exclusion Constraint Definition ---")
+
+		// Exclusion Constraint 정의
+		exclusionStateScope := StateScope{
+			AccessList: types.AccessList{
+				{
+					Address: common.HexToAddress("0x1234567890123456789012345678901234567890"),
+					StorageKeys: []common.Hash{
+						common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000001"),
+						common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000002"),
+					},
+				},
+			},
+			LockId: common.HexToHash("0xabcd1234"),
+		}
+
+		t.Logf("Exclusion Constraint LockId: %s", exclusionStateScope.LockId.Hex())
+		t.Logf("Protected Access List (%d entries):", len(exclusionStateScope.AccessList))
+		for i, entry := range exclusionStateScope.AccessList {
+			t.Logf("  [%d] Protected Address: %s", i, entry.Address.Hex())
+			t.Logf("      Protected Storage Keys (%d):", len(entry.StorageKeys))
+			for j, key := range entry.StorageKeys {
+				t.Logf("        [%d] %s", j, key.Hex())
+			}
+		}
+
+		t.Log("--- Step 4: Conflict Detection Analysis ---")
+
+		// 각 트랜잭션에 대해 충돌 검사 수행
+		conflictResults := make(map[common.Hash]bool)
+
+		for addr, txs := range mockPendingTxs {
+			t.Logf("Analyzing transactions from address %s:", addr.Hex())
+			for i, tx := range txs {
+				hasConflict := checkAccessListConflict(tx, exclusionStateScope)
+				conflictResults[tx.Hash()] = hasConflict
+
+				t.Logf("  Tx[%d] Hash=%s: Conflict=%v", i, tx.Hash().Hex(), hasConflict)
+
+				if hasConflict {
+					// 충돌 상세 분석
+					t.Logf("    Conflict Details:")
+					txAccessList := tx.AccessList()
+					if txAccessList != nil {
+						for _, txAccess := range txAccessList {
+							for _, protectedAccess := range exclusionStateScope.AccessList {
+								if txAccess.Address == protectedAccess.Address {
+									t.Logf("      Address conflict: %s", txAccess.Address.Hex())
+									for _, txKey := range txAccess.StorageKeys {
+										for _, protectedKey := range protectedAccess.StorageKeys {
+											if txKey == protectedKey {
+												t.Logf("        Storage key conflict: %s", txKey.Hex())
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		t.Log("--- Step 5: Filtering Results ---")
+
+		// 필터링 실행
+		exclusionConstraints := map[common.Hash]types.AccessList{
+			exclusionStateScope.LockId: exclusionStateScope.AccessList,
+		}
+
+		filteredTxs := filterByExclusionConstraints(mockPendingTxs, exclusionConstraints)
+
+		t.Logf("Filtering Summary:")
+		t.Logf("  Original transactions: %d", getTotalTxCount(mockPendingTxs))
+		t.Logf("  Filtered transactions: %d", getTotalTxCount(filteredTxs))
+		t.Logf("  Removed transactions: %d", getTotalTxCount(mockPendingTxs)-getTotalTxCount(filteredTxs))
+
+		t.Log("Remaining transactions after filtering:")
+		for addr, txs := range filteredTxs {
+			t.Logf("  Address %s: %d transactions", addr.Hex(), len(txs))
+			for i, tx := range txs {
+				t.Logf("    [%d] Hash=%s (No conflict)", i, tx.Hash().Hex())
+			}
+		}
+
+		t.Log("Removed transactions:")
+		for addr, originalTxs := range mockPendingTxs {
+			filteredTxsForAddr, exists := filteredTxs[addr]
+			if !exists {
+				filteredTxsForAddr = []*types.Transaction{}
+			}
+
+			for _, originalTx := range originalTxs {
+				found := false
+				for _, filteredTx := range filteredTxsForAddr {
+					if originalTx.Hash() == filteredTx.Hash() {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Logf("    Removed: Hash=%s (Conflict detected)", originalTx.Hash().Hex())
+				}
+			}
+		}
+	})
+
+	// 기본 Access List 추출 테스트
+	t.Run("ExtractAccessListFromTransaction", func(t *testing.T) {
+		t.Log("--- Testing Access List Extraction ---")
+
+		extractedAccessList := conflictingTx.AccessList()
+		require.NotNil(t, extractedAccessList)
+		require.Equal(t, 1, len(extractedAccessList))
+
+		accessTuple := extractedAccessList[0]
+		require.Equal(t, common.HexToAddress("0x1234567890123456789012345678901234567890"), accessTuple.Address)
+		require.Equal(t, 2, len(accessTuple.StorageKeys))
+
+		t.Logf("Extracted Access List: %+v", extractedAccessList)
+	})
+}
+
 func TestSubscribeProposerConstraints(t *testing.T) {
 	// ------------ Start Builder setup ------------- //
 	const (
@@ -484,17 +1177,19 @@ func TestDeserializeConstraints(t *testing.T) {
 	err := json.Unmarshal([]byte(jsonStr), &constraints)
 	require.NoError(t, err)
 
-	jsonStr = `{
-		"message": {
-			"pubkey":"0xb3cd9c9e59730c210bf9b76959bf11e20bb05cf47cfefdcaab74bc17c369d6daefe1219c2b94d743ffd27988edf24b90",
-			"slot":183,
-			"top":false,
-			"transactions": [
-				"0xf8678085019dc6838082520894deaddeaddeaddeaddeaddeaddeaddeaddeaddead04808360306ca0fde9bdf8f1a9fefef7538490242afb21a0160cf19f1686c7b9bddb45de973b62a0318411f2c959d3e6a25434f99850a0eaa6beb617f7a2dbc9683dccded7bd4b10"
-			]
-		},
-		"signature": "0xaa8a47c6398d5862b56d1bbb308352c65e57e62b0bfdda39a36db7fff3a256c3c7066b219a15a013aae5303f42b6f07b025f34ed6d899e6172fec20d40c4ffebeb50f5d0b75a303c1cc916574c3e0f29d53b2211d28234f430fffce62b4ee554"
-	}`
+	jsonStr = `[
+		{
+			"message": {
+				"pubkey":"0xb3cd9c9e59730c210bf9b76959bf11e20bb05cf47cfefdcaab74bc17c369d6daefe1219c2b94d743ffd27988edf24b90",
+				"slot":183,
+				"top":false,
+				"transactions": [
+					"0xf8678085019dc6838082520894deaddeaddeaddeaddeaddeaddeaddeaddeaddead04808360306ca0fde9bdf8f1a9fefef7538490242afb21a0160cf19f1686c7b9bddb45de973b62a0318411f2c959d3e6a25434f99850a0eaa6beb617f7a2dbc9683dccded7bd4b10"
+				]
+			},
+			"signature": "0xaa8a47c6398d5862b56d1bbb308352c65e57e62b0bfdda39a36db7fff3a256c3c7066b219a15a013aae5303f42b6f07b025f34ed6d899e6172fec20d40c4ffebeb50f5d0b75a303c1cc916574c3e0f29d53b2211d28234f430fffce62b4ee554"
+		}
+	]`
 
 	err = json.Unmarshal([]byte(jsonStr), &constraints)
 	require.NoError(t, err)
@@ -529,9 +1224,9 @@ func sseConstraintsHandler(w http.ResponseWriter, r *http.Request) {
 // generateMockConstraintsForSlot generates a list of constraints for a given slot
 func generateMockConstraintsForSlot(slot uint64) types.SignedConstraintsList {
 	rawTx := new(types.Transaction)
-	err := rawTx.UnmarshalBinary(common.Hex2Bytes("0x02f876018305da308401312d0085041f1196d2825208940c598786c88883ff5e4f461750fad64d3fae54268804b7ec32d7a2000080c080a0086f02eacec72820be3b117e1edd5bd7ed8956964b28b2d903d2cba53dd13560a06d61ec9ccce6acb31bf21878b9a844e7fdac860c5b7d684f7eb5f38a5945357c"))
+	err := rawTx.UnmarshalBinary(common.Hex2Bytes("02f87601836384348477359400850517683ba883019a28943678fce4028b6745eb04fa010d9c8e4b36d6288c872b0f1366ad800080c080a0b6b7aba1954160d081b2c8612e039518b9c46cd7df838b405a03f927ad196158a071d2fb6813e5b5184def6bd90fb5f29e0c52671dea433a7decb289560a58416e"))
 	if err != nil {
-		fmt.Println("Failed to unmarshal rawTx: ", err)
+		panic(fmt.Sprintf("Failed to unmarshal rawTx: %v", err))
 	}
 
 	return types.SignedConstraintsList{
