@@ -62,27 +62,35 @@ If you want to manage multiple versions of Go easily, you can use `gvm`.
 
 Once Go is installed and set up, you can run the tests to ensure everything is working as expected.
 
-To run the tests and get detailed output, use the following command:
+To run the Bolt commitment tests and get detailed output, use the following commands:
+
+#### Running Exclusion Commitment Tests
 
 ```bash
-go test -run TestAccessListExclusionConstraints ./builder -v
+go test -run TestExclusionCommitment ./builder -v
 ```
 
-* **`-v` flag**: The `-v` flag stands for **verbose**. It ensures that Go tests output detailed information about each test case, including whether the tests passed or failed, along with additional debugging information.
+#### Running Inclusion Commitment Tests
 
-* **`-run` flag**: This flag is used to specify a particular test or test pattern to run. In this case, `TestAccessListExclusionConstraints` is the name of the test function you want to run.
+```bash
+go test -run TestInclusionCommitment ./builder -v
+```
+
+#### Running Both Commitment Tests
+
+```bash
+go test -run "Test(Exclusion|Inclusion)Commitment" ./builder -v
+```
+
+* **`-v` flag**: The `-v` flag stands for **verbose**. It ensures that Go tests output detailed information about each test case, including whether the tests passed or failed, along with additional debugging information about StateScope validation and constraint processing.
+
+* **`-run` flag**: This flag is used to specify a particular test or test pattern to run. In this case, `TestExclusionCommitment` and `TestInclusionCommitment` are the test functions for Bolt protocol commitment scenarios.
 
 * **Test Directory**: The `./builder` specifies the path to the package that contains the tests. If your tests are located in a different package or directory, you can adjust the path accordingly.
 
-### 3. **View Detailed Test Output**
+### 3. **Test Coverage**
 
-Running the above command will display detailed logs for each test case. For example:
+These tests cover the following protocol commitment scenarios:
 
-```bash
-=== RUN   TestAccessListExclusionConstraints
---- PASS: TestAccessListExclusionConstraints (0.00s)
-PASS
-ok      ./builder   0.001s
-```
-
-If there are any issues with the test, the output will display failure messages and relevant logs to help you debug the issue.
+- **Exclusion Commitment**: Tests the filtering of conflicting transactions based on StateScope address conflicts
+- **Inclusion Commitment**: Tests the inclusion of winning transactions through constraint cache mechanisms
