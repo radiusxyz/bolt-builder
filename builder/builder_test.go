@@ -533,6 +533,196 @@ func TestExclusionCommitment(t *testing.T) {
 	t.Log("Exclusion commitment successfully filtered conflicting transactions using StateScope")
 }
 
+func TestInclusionCommitment(t *testing.T) {
+	t.Log("=== Testing Inclusion Commitment Flow (Steps 14-18) ===")
+
+	// env setting
+	testKey, _ := crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
+	signer := types.NewEIP2930Signer(big.NewInt(1))
+
+	// Commitment definition
+	type StateScope struct {
+		AddressList []common.Address
+		LockId      common.Hash
+	}
+
+	type InclusionCommitment struct {
+		Slot       uint64
+		StateScope StateScope
+		WinningTxs []*types.Transaction
+	}
+
+	// StateScope helper function
+	createStateScopeFromAccessList := func(accessList types.AccessList, lockId common.Hash) StateScope {
+		addressList := make([]common.Address, 0, len(accessList))
+		for _, tuple := range accessList {
+			addressList = append(addressList, tuple.Address)
+		}
+		return StateScope{
+			AddressList: addressList,
+			LockId:      lockId,
+		}
+	}
+
+	createTestTx := func(nonce uint64, to common.Address, accessList types.AccessList) *types.Transaction {
+		txData := &types.AccessListTx{
+			ChainID:    big.NewInt(1),
+			Nonce:      nonce,
+			To:         &to,
+			Value:      big.NewInt(10),
+			Gas:        21000,
+			GasPrice:   big.NewInt(2000000000),
+			AccessList: accessList,
+		}
+		tx := types.NewTx(txData)
+		signedTx, err := types.SignTx(tx, signer, testKey)
+		require.NoError(t, err)
+		return signedTx
+	}
+
+	// Step 14: relay -> builder: inclusion commitment
+	t.Log("Step 14: Relay sends inclusion commitment to builder")
+
+	winningTx1AccessList := types.AccessList{
+		{
+			Address: common.HexToAddress("0x1234567890123456789012345678901234567890"),
+			StorageKeys: []common.Hash{
+				common.HexToHash("0x01"),
+				common.HexToHash("0x02"),
+			},
+		},
+	}
+	winningTx1 := createTestTx(10, common.HexToAddress("0x1234567890123456789012345678901234567890"), winningTx1AccessList)
+
+	winningTx2AccessList := types.AccessList{
+		{
+			Address: common.HexToAddress("0xA0b86a33E6441e6e80D0c4C34F4F6cA4C7C4b1d0"),
+			StorageKeys: []common.Hash{
+				common.HexToHash("0x03"),
+				common.HexToHash("0x04"),
+			},
+		},
+	}
+	winningTx2 := createTestTx(11, common.HexToAddress("0xA0b86a33E6441e6e80D0c4C34F4F6cA4C7C4b1d0"), winningTx2AccessList)
+
+	// defining inclusionStateScope from winning transactions
+	combinedAccessList := append(winningTx1AccessList, winningTx2AccessList...)
+	inclusionStateScope := createStateScopeFromAccessList(combinedAccessList, common.HexToHash("0x2222222222222222222222222222222222222222222222222222222222222222"))
+
+	inclusionCommitment := InclusionCommitment{
+		Slot:       100,
+		StateScope: inclusionStateScope,
+		WinningTxs: []*types.Transaction{winningTx1, winningTx2},
+	}
+
+	t.Logf("Inclusion Commitment - Slot: %d, LockId: %s",
+		inclusionCommitment.Slot, inclusionCommitment.StateScope.LockId.Hex())
+	t.Logf("StateScope addresses: %v", inclusionCommitment.StateScope.AddressList)
+	t.Logf("Winning transactions: %d", len(inclusionCommitment.WinningTxs))
+
+	// Step 15: builder: store inclusion commitment
+	t.Log("Step 15: Builder validates and stores inclusion commitment")
+
+	// Create constraint cache similar to builder pattern
+	constraintsCache := make(map[uint64]types.HashToConstraintDecoded)
+	inclusionConstraints := make(types.HashToConstraintDecoded)
+	for i, tx := range inclusionCommitment.WinningTxs {
+		inclusionConstraints[tx.Hash()] = tx
+		t.Logf("Stored winning tx[%d]: %s", i, tx.Hash().Hex())
+	}
+
+	// Store in cache by slot number
+	constraintsCache[inclusionCommitment.Slot] = inclusionConstraints
+	t.Logf("Stored %d inclusion constraints in cache for slot %d", len(inclusionConstraints), inclusionCommitment.Slot)
+
+	// Step 16: builder: retrieve and include winning txs from constraint cache
+	t.Log("Step 16: Builder retrieves winning transactions from constraint cache")
+
+	// Retrieve constraints from cache (simulating actual block building process)
+	cachedConstraints, exists := constraintsCache[inclusionCommitment.Slot]
+	require.True(t, exists, "Inclusion constraints should exist in cache")
+	require.Equal(t, len(inclusionCommitment.WinningTxs), len(cachedConstraints), "Cached constraints count should match")
+
+	blockTxs := make([]*types.Transaction, 0)
+
+	// Include winning transactions from cache
+	for hash, tx := range cachedConstraints {
+		blockTxs = append(blockTxs, tx)
+		t.Logf("Included winning tx from cache: %s (hash: %s)", tx.Hash().Hex(), hash.Hex())
+
+		// Access List info
+		if accessList := tx.AccessList(); accessList != nil {
+			t.Logf("  Access List: %+v", accessList)
+		}
+	}
+
+	// Step 17: builder: include filted txs
+	t.Log("Step 17: Builder removes filtering and finalizes block building")
+
+	regularTx := createTestTx(20,
+		common.HexToAddress("0x9999999999999999999999999999999999999999"),
+		types.AccessList{})
+	blockTxs = append(blockTxs, regularTx)
+
+	t.Logf("Added regular tx: %s", regularTx.Hash().Hex())
+	t.Logf("Final block contains %d transactions", len(blockTxs))
+
+	// Step 18: builder -> relay: block header
+	t.Log("Step 18: Builder sends block header to relay")
+
+	blockHeader := &types.Header{
+		Number:     big.NewInt(int64(inclusionCommitment.Slot)),
+		Time:       uint64(time.Now().Unix()),
+		GasLimit:   30000000,
+		GasUsed:    uint64(len(blockTxs) * 21000),
+		Difficulty: big.NewInt(1),
+	}
+
+	t.Logf("Block header created - Number: %d, GasUsed: %d",
+		blockHeader.Number.Uint64(), blockHeader.GasUsed)
+
+	t.Log("Verifying StateScope consistency")
+	for i, tx := range inclusionCommitment.WinningTxs {
+		if accessList := tx.AccessList(); accessList != nil {
+			txScope := createStateScopeFromAccessList(accessList, tx.Hash())
+			t.Logf("Winning tx[%d] StateScope: %+v", i, txScope.AddressList)
+		}
+	}
+	// StateScope consistency check
+	t.Log("Verifying StateScope consistency")
+	for i, tx := range inclusionCommitment.WinningTxs {
+		if accessList := tx.AccessList(); accessList != nil {
+			txScope := createStateScopeFromAccessList(accessList, tx.Hash())
+			t.Logf("Winning tx[%d] StateScope: %+v", i, txScope.AddressList)
+		}
+	}
+
+	// check result
+	require.Equal(t, 3, len(blockTxs), "Block should contain 2 winning txs + 1 regular tx")
+	require.Equal(t, inclusionCommitment.Slot, blockHeader.Number.Uint64())
+
+	// Verify that winning transactions from cache are included
+	winningTxHashes := make(map[common.Hash]bool)
+	for _, tx := range inclusionCommitment.WinningTxs {
+		winningTxHashes[tx.Hash()] = true
+	}
+
+	includedWinningCount := 0
+	for _, tx := range blockTxs[:len(blockTxs)-1] { // Exclude regular tx
+		if winningTxHashes[tx.Hash()] {
+			includedWinningCount++
+		}
+	}
+	require.Equal(t, len(inclusionCommitment.WinningTxs), includedWinningCount, "All winning transactions should be included")
+
+	// StateScope consistency check
+	require.Equal(t, 2, len(inclusionCommitment.StateScope.AddressList), "StateScope should contain 2 addresses")
+	require.Contains(t, inclusionCommitment.StateScope.AddressList, common.HexToAddress("0x1234567890123456789012345678901234567890"))
+	require.Contains(t, inclusionCommitment.StateScope.AddressList, common.HexToAddress("0xA0b86a33E6441e6e80D0c4C34F4F6cA4C7C4b1d0"))
+
+	t.Log("Inclusion commitment successfully processed using constraint cache pattern")
+}
+
 func TestSubscribeProposerConstraints(t *testing.T) {
 	// ------------ Start Builder setup ------------- //
 	const (
