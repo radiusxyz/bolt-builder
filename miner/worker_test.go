@@ -533,7 +533,6 @@ func testGetSealingWork(t *testing.T, chainConfig *params.ChainConfig, engine co
 			noTxs:            false,
 			forceTime:        true,
 			onBlock:          nil,
-			constraintsCache: constraintsCache,
 		})
 		if c.expectErr {
 			if r.err == nil {

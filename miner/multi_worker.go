@@ -103,7 +103,8 @@ func (w *multiWorker) buildPayload(args *BuildPayloadArgs) (*Payload, error) {
 		beaconRoot:       args.BeaconRoot,
 		noTxs:            true,
 		slot:             args.Slot,
-		constraintsCache: args.ConstraintsCache,
+		inclusionConstraintsCache: args.InclusionConstraintsCache,
+		exclusionConstraintsCache: args.ExclusionConstraintsCache,
 	}
 	for _, worker := range w.workers {
 		empty = worker.getSealingBlock(emptyParams)
@@ -143,7 +144,8 @@ func (w *multiWorker) buildPayload(args *BuildPayloadArgs) (*Payload, error) {
 			noTxs:            false,
 			onBlock:          args.BlockHook,
 			slot:             args.Slot,
-			constraintsCache: args.ConstraintsCache,
+			inclusionConstraintsCache: args.InclusionConstraintsCache,
+			exclusionConstraintsCache: args.ExclusionConstraintsCache,
 		}
 
 		go func(w *worker) {

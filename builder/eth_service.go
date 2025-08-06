@@ -16,7 +16,9 @@ import (
 )
 
 type IEthereumService interface {
-	BuildBlock(attrs *types.BuilderPayloadAttributes, sealedBlockCallback miner.BlockHookFn, constraintsCache *shardmap.FIFOMap[uint64, types.HashToConstraintDecoded]) error
+	BuildBlock(attrs *types.BuilderPayloadAttributes, sealedBlockCallback miner.BlockHookFn, 
+		inclusionConstraintsCache *shardmap.FIFOMap[uint64, types.HashToConstraintDecoded],  
+        exclusionConstraintsCache *shardmap.FIFOMap[uint64, types.HashToConstraintDecoded]) error 
 	GetBlockByHash(hash common.Hash) *types.Block
 	Config() *params.ChainConfig
 	Synced() bool
@@ -34,7 +36,9 @@ type testEthereumService struct {
 	testConstraints    []*types.Transaction
 }
 
-func (t *testEthereumService) BuildBlock(attrs *types.BuilderPayloadAttributes, sealedBlockCallback miner.BlockHookFn, constraintsCache *shardmap.FIFOMap[uint64, types.HashToConstraintDecoded]) error {
+func (t *testEthereumService) BuildBlock(attrs *types.BuilderPayloadAttributes, sealedBlockCallback miner.BlockHookFn, 
+	inclusionConstraintsCache *shardmap.FIFOMap[uint64, types.HashToConstraintDecoded], 
+	exclusionConstraintsCache *shardmap.FIFOMap[uint64, types.HashToConstraintDecoded]) error {
 	sealedBlockCallback(t.testBlock, t.testBlockValue, t.testBlobSidecar, time.Now(), t.testBundlesMerged, t.testAllBundles, t.testUsedSbundles)
 	return nil
 }
@@ -54,7 +58,10 @@ func NewEthereumService(eth *eth.Ethereum) *EthereumService {
 }
 
 // TODO: we should move to a setup similar to catalyst local blocks & payload ids
-func (s *EthereumService) BuildBlock(attrs *types.BuilderPayloadAttributes, sealedBlockCallback miner.BlockHookFn, constraintsCache *shardmap.FIFOMap[uint64, types.HashToConstraintDecoded]) error {
+func (s *EthereumService) BuildBlock(attrs *types.BuilderPayloadAttributes, sealedBlockCallback miner.BlockHookFn, 
+	inclusionConstraintsCache *shardmap.FIFOMap[uint64, types.HashToConstraintDecoded],  
+	exclusionConstraintsCache *shardmap.FIFOMap[uint64, types.HashToConstraintDecoded]) error {
+	
 	// Send a request to generate a full block in the background.
 	// The result can be obtained via the returned channel.
 	args := &miner.BuildPayloadArgs{
@@ -67,7 +74,8 @@ func (s *EthereumService) BuildBlock(attrs *types.BuilderPayloadAttributes, seal
 		BeaconRoot:       attrs.ParentBeaconBlockRoot,
 		Slot:             attrs.Slot,
 		BlockHook:        sealedBlockCallback,
-		ConstraintsCache: constraintsCache,
+		InclusionConstraintsCache: inclusionConstraintsCache,
+		ExclusionConstraintsCache: exclusionConstraintsCache,
 	}
 
 	payload, err := s.eth.Miner().BuildPayload(args)

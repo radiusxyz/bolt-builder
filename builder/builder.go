@@ -11,7 +11,6 @@ import (
 	"math/big"
 	"net/http"
 	_ "os"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -99,10 +98,14 @@ type Builder struct {
 	discardRevertibleTxOnErr    bool
 
 	// constraintsCache is a map from slot to the decoded constraints made by proposers
-	constraintsCache *shardmap.FIFOMap[uint64, types.HashToConstraintDecoded]
+	inclusionConstraintsCache *shardmap.FIFOMap[uint64, types.HashToConstraintDecoded]
+	exclusionConstraintsCache *shardmap.FIFOMap[uint64, types.HashToConstraintDecoded]
 	// NOTE: `shardmap` already provides locks, however for handling multiple
 	// relay subscriptions for constraints we need a lock to protect the cache
 	// between the `Get` and `Put` operation
+	// TODO: Split locking for inclusionConstraintsCache and exclusionConstraintsCache
+	// Currently both share a single mutex, which causes unnecessary blocking.
+	// Define separate sync.Mutex for each to enable parallel async updates.
 	updateConstraintsCacheLock sync.Mutex
 
 	limiter                       *rate.Limiter
@@ -116,6 +119,7 @@ type Builder struct {
 
 	stop chan struct{}
 }
+
 
 // BuilderArgs is a struct that contains all the arguments needed to create a new Builder
 type BuilderArgs struct {
@@ -187,7 +191,8 @@ func NewBuilder(args BuilderArgs) (*Builder, error) {
 
 	slotCtx, slotCtxCancel := context.WithCancel(context.Background())
 
-	constraintsCache := shardmap.NewFIFOMap[uint64, types.HashToConstraintDecoded](64, 16, shardmap.HashUint64)
+	inclusionConstraintsCache := shardmap.NewFIFOMap[uint64, types.HashToConstraintDecoded](64, 16, shardmap.HashUint64)
+	exclusionConstraintsCache := shardmap.NewFIFOMap[uint64, types.HashToConstraintDecoded](64, 16, shardmap.HashUint64)
 
 	return &Builder{
 		ds:                            args.ds,
@@ -206,7 +211,8 @@ func NewBuilder(args BuilderArgs) (*Builder, error) {
 		discardRevertibleTxOnErr:      args.discardRevertibleTxOnErr,
 		submissionOffsetFromEndOfSlot: args.submissionOffsetFromEndOfSlot,
 
-		constraintsCache: constraintsCache,
+		inclusionConstraintsCache: inclusionConstraintsCache,
+		exclusionConstraintsCache: exclusionConstraintsCache,
 
 		limiter:       args.limiter,
 		slotCtx:       slotCtx,
@@ -379,7 +385,14 @@ func (b *Builder) subscribeToRelayForConstraints(relayBaseEndpoint string) error
 
 			for _, constraint := range constraintsSigned {
 				if b.verifyConstraints {
-					if !slices.Contains(b.slotConstraintsPubkeys, constraint.Message.Pubkey) {
+					found := false
+					for _, pubkey := range b.slotConstraintsPubkeys {
+						if pubkey == constraint.Message.Pubkey {
+							found = true
+							break
+						}
+					}
+					if !found {
 						log.Warn("Received constraint from unauthorized pubkey", "pubkey", constraint.Message.Pubkey)
 						continue
 					}
@@ -398,21 +411,30 @@ func (b *Builder) subscribeToRelayForConstraints(relayBaseEndpoint string) error
 				}
 				// Take the lock to update the constraints cache: both `Get` and `Put` must be done by the same entity
 				b.updateConstraintsCacheLock.Lock()
-				// For every constraint, we need to check if it has already been seen for the associated slot
-				slotConstraints, _ := b.constraintsCache.Get(constraint.Message.Slot)
-				if len(slotConstraints) == 0 {
-					b.constraintsCache.Put(constraint.Message.Slot, decodedConstraints)
-					b.updateConstraintsCacheLock.Unlock()
-					continue
+				if constraint.Message.Top {
+					// Inclusion constraint
+
+					slotConstraints, _ := b.inclusionConstraintsCache.Get(constraint.Message.Slot)
+					if len(slotConstraints) == 0 {
+						b.inclusionConstraintsCache.Put(constraint.Message.Slot, decodedConstraints)
+					} else {
+						for hash := range decodedConstraints {
+							slotConstraints[hash] = decodedConstraints[hash]
+						}
+						b.inclusionConstraintsCache.Put(constraint.Message.Slot, slotConstraints)
+					}
+				} else {
+					// Exclusion constraint
+					slotConstraints, _ := b.exclusionConstraintsCache.Get(constraint.Message.Slot)
+					if len(slotConstraints) == 0 {
+						b.exclusionConstraintsCache.Put(constraint.Message.Slot, decodedConstraints)
+					} else {
+						for hash := range decodedConstraints {
+							slotConstraints[hash] = decodedConstraints[hash]
+						}
+						b.exclusionConstraintsCache.Put(constraint.Message.Slot, slotConstraints)
+					}
 				}
-
-				for hash := range decodedConstraints {
-					slotConstraints[hash] = decodedConstraints[hash]
-
-					log.Debug(fmt.Sprintf("Adding constraint with hash %s to cache for slot %d", hash, constraint.Message.Slot))
-				}
-
-				b.constraintsCache.Put(constraint.Message.Slot, slotConstraints)
 				b.updateConstraintsCacheLock.Unlock()
 			}
 		}
@@ -477,14 +499,14 @@ func (b *Builder) onSealedBlock(opts SubmitBlockOpts) error {
 	var versionedBlockRequestWithConstraintProofs *types.VersionedSubmitBlockRequestWithProofs
 
 	// BOLT: fetch constraints from the cache, which is automatically updated by the SSE subscription
-	constraints, _ := b.constraintsCache.Get(opts.PayloadAttributes.Slot)
-	log.Info(fmt.Sprintf("[BOLT]: Found %d constraints for slot %d", len(constraints), opts.PayloadAttributes.Slot))
+	inclusionConstraints, _ := b.inclusionConstraintsCache.Get(opts.PayloadAttributes.Slot)
+	log.Info(fmt.Sprintf("[BOLT]: Found %d inclusionConstraints for slot %d", len(inclusionConstraints), opts.PayloadAttributes.Slot))
 
-	if len(constraints) > 0 {
-		message := fmt.Sprintf("sealing block %d with %d constraints", opts.Block.Number(), len(constraints))
+	if len(inclusionConstraints) > 0 {
+		message := fmt.Sprintf("sealing block %d with %d inclusionConstraints", opts.Block.Number(), len(inclusionConstraints))
 		log.Info(message)
 
-		inclusionProof, _, err := CalculateMerkleMultiProofs(opts.Block.Transactions(), constraints)
+		inclusionProof, _, err := CalculateMerkleMultiProofs(opts.Block.Transactions(), inclusionConstraints)
 		if err != nil {
 			log.Error("[BOLT]: could not calculate merkle multiproofs", "err", err)
 			return err
@@ -514,11 +536,11 @@ func (b *Builder) onSealedBlock(opts SubmitBlockOpts) error {
 		if versionedBlockRequestWithConstraintProofs != nil {
 			log.Info(fmt.Sprintf("[BOLT]: Sending sealed block %d with proofs to relay", opts.Block.Number()))
 			err = b.relay.SubmitBlockWithProofs(versionedBlockRequestWithConstraintProofs, opts.ValidatorData)
-		} else if len(constraints) == 0 {
+		} else if len(inclusionConstraints) == 0 {
 			// If versionedBlockRequestWithConstraintsProofs is nil and no constraints, then we don't have proofs to send
 			err = b.relay.SubmitBlock(versionedBlockRequest, opts.ValidatorData)
 		} else {
-			log.Warn(fmt.Sprintf("[BOLT]: Could not send sealed block this time because we have %d constraints but no proofs", len(constraints)))
+			log.Warn(fmt.Sprintf("[BOLT]: Could not send sealed block this time because we have %d inclusionConstraints but no proofs", len(inclusionConstraints)))
 			return nil
 		}
 		if err != nil {
@@ -783,7 +805,7 @@ func (b *Builder) runBuildingJob(slotCtx context.Context, proposerPubkey phase0.
 			"slot", attrs.Slot,
 			"parent", attrs.HeadHash,
 			"resubmit-interval", b.builderResubmitInterval.String())
-		err := b.eth.BuildBlock(attrs, blockHook, b.constraintsCache)
+		err := b.eth.BuildBlock(attrs, blockHook, b.inclusionConstraintsCache, b.exclusionConstraintsCache)
 		if err != nil {
 			log.Warn("Failed to build block", "err", err)
 		}
