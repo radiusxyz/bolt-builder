@@ -16,9 +16,9 @@ import (
 )
 
 type IEthereumService interface {
-	BuildBlock(attrs *types.BuilderPayloadAttributes, sealedBlockCallback miner.BlockHookFn, 
-		inclusionConstraintsCache *shardmap.FIFOMap[uint64, types.HashToConstraintDecoded],  
-        exclusionConstraintsCache *shardmap.FIFOMap[uint64, types.HashToConstraintDecoded]) error 
+	BuildBlock(attrs *types.BuilderPayloadAttributes, sealedBlockCallback miner.BlockHookFn,
+		inclusionConstraintsCache *shardmap.FIFOMap[uint64, types.HashToConstraintDecoded],
+		exclusionConstraintsCache *shardmap.FIFOMap[uint64, types.HashToConstraintDecoded]) error
 	GetBlockByHash(hash common.Hash) *types.Block
 	Config() *params.ChainConfig
 	Synced() bool
@@ -36,8 +36,8 @@ type testEthereumService struct {
 	testConstraints    []*types.Transaction
 }
 
-func (t *testEthereumService) BuildBlock(attrs *types.BuilderPayloadAttributes, sealedBlockCallback miner.BlockHookFn, 
-	inclusionConstraintsCache *shardmap.FIFOMap[uint64, types.HashToConstraintDecoded], 
+func (t *testEthereumService) BuildBlock(attrs *types.BuilderPayloadAttributes, sealedBlockCallback miner.BlockHookFn,
+	inclusionConstraintsCache *shardmap.FIFOMap[uint64, types.HashToConstraintDecoded],
 	exclusionConstraintsCache *shardmap.FIFOMap[uint64, types.HashToConstraintDecoded]) error {
 	sealedBlockCallback(t.testBlock, t.testBlockValue, t.testBlobSidecar, time.Now(), t.testBundlesMerged, t.testAllBundles, t.testUsedSbundles)
 	return nil
@@ -58,22 +58,22 @@ func NewEthereumService(eth *eth.Ethereum) *EthereumService {
 }
 
 // TODO: we should move to a setup similar to catalyst local blocks & payload ids
-func (s *EthereumService) BuildBlock(attrs *types.BuilderPayloadAttributes, sealedBlockCallback miner.BlockHookFn, 
-	inclusionConstraintsCache *shardmap.FIFOMap[uint64, types.HashToConstraintDecoded],  
+func (s *EthereumService) BuildBlock(attrs *types.BuilderPayloadAttributes, sealedBlockCallback miner.BlockHookFn,
+	inclusionConstraintsCache *shardmap.FIFOMap[uint64, types.HashToConstraintDecoded],
 	exclusionConstraintsCache *shardmap.FIFOMap[uint64, types.HashToConstraintDecoded]) error {
-	
+
 	// Send a request to generate a full block in the background.
 	// The result can be obtained via the returned channel.
 	args := &miner.BuildPayloadArgs{
-		Parent:           attrs.HeadHash,
-		Timestamp:        uint64(attrs.Timestamp),
-		FeeRecipient:     attrs.SuggestedFeeRecipient,
-		GasLimit:         attrs.GasLimit,
-		Random:           attrs.Random,
-		Withdrawals:      attrs.Withdrawals,
-		BeaconRoot:       attrs.ParentBeaconBlockRoot,
-		Slot:             attrs.Slot,
-		BlockHook:        sealedBlockCallback,
+		Parent:                    attrs.HeadHash,
+		Timestamp:                 uint64(attrs.Timestamp),
+		FeeRecipient:              attrs.SuggestedFeeRecipient,
+		GasLimit:                  attrs.GasLimit,
+		Random:                    attrs.Random,
+		Withdrawals:               attrs.Withdrawals,
+		BeaconRoot:                attrs.ParentBeaconBlockRoot,
+		Slot:                      attrs.Slot,
+		BlockHook:                 sealedBlockCallback,
 		InclusionConstraintsCache: inclusionConstraintsCache,
 		ExclusionConstraintsCache: exclusionConstraintsCache,
 	}

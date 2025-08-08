@@ -76,10 +76,14 @@ go test -run TestExclusionCommitment ./builder -v
 go test -run TestInclusionCommitment ./builder -v
 ```
 
-#### Running Both Commitment Tests
+#### Test List
 
 ```bash
-go test -run "Test(Exclusion|Inclusion)Commitment" ./builder -v
+go test -run TestInclusionCommitment ./builder -v
+go test -run TestExclusionCommitment ./builder -v
+go test -run TestExclusionConstraintFiltering ./miner -v
+go test -run TestInclusionConstraintDynamicDetection ./miner -v
+go test -run TestAlgorithmSelection ./miner -v
 ```
 
 * **`-v` flag**: The `-v` flag stands for **verbose**. It ensures that Go tests output detailed information about each test case, including whether the tests passed or failed, along with additional debugging information about StateScope validation and constraint processing.

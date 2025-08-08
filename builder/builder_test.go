@@ -809,11 +809,11 @@ func TestSubscribeProposerConstraints(t *testing.T) {
 	go http.ListenAndServe(":"+relayPort, gzipMux)
 
 	// Constraints should not be available yet
-	_, okInclusion := builder.inclusionConstraintsCache.Get(0)  
-	require.Equal(t, false, okInclusion) 
+	_, okInclusion := builder.inclusionConstraintsCache.Get(0)
+	require.Equal(t, false, okInclusion)
 
-	_, okExclusion := builder.exclusionConstraintsCache.Get(0)  
-	require.Equal(t, false, okExclusion)  
+	_, okExclusion := builder.exclusionConstraintsCache.Get(0)
+	require.Equal(t, false, okExclusion)
 
 	go builder.subscribeToRelayForConstraints(builder.relay.Config().Endpoint)
 	// Wait 2 seconds to save all constraints in cache
