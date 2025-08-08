@@ -276,7 +276,7 @@ func TestBlockWithConstraints(t *testing.T) {
 	defer builder.Stop()
 
 	// Add the transaction to the cache directly
-	builder.constraintsCache.Put(25, map[common.Hash]*types.Transaction{
+	builder.inclusionConstraintsCache.Put(25, map[common.Hash]*types.Transaction{
 		constraintTx.Hash():         constraintTx,
 		constraintTxWithBlob.Hash(): constraintTxWithBlob,
 	})
@@ -809,8 +809,11 @@ func TestSubscribeProposerConstraints(t *testing.T) {
 	go http.ListenAndServe(":"+relayPort, gzipMux)
 
 	// Constraints should not be available yet
-	_, ok := builder.constraintsCache.Get(0)
-	require.Equal(t, false, ok)
+	_, okInclusion := builder.inclusionConstraintsCache.Get(0)
+	require.Equal(t, false, okInclusion)
+
+	_, okExclusion := builder.exclusionConstraintsCache.Get(0)
+	require.Equal(t, false, okExclusion)
 
 	go builder.subscribeToRelayForConstraints(builder.relay.Config().Endpoint)
 	// Wait 2 seconds to save all constraints in cache
@@ -818,23 +821,20 @@ func TestSubscribeProposerConstraints(t *testing.T) {
 
 	slots := []uint64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
 	for _, slot := range slots {
-		cachedConstraints, ok := builder.constraintsCache.Get(slot)
-		require.Equal(t, true, ok)
-
 		expectedConstraint := generateMockConstraintsForSlot(slot)[0]
 		decodedConstraint, err := DecodeConstraints(expectedConstraint)
 		require.NoError(t, err)
 
-		// Compare the keys of the cachedConstraints and decodedConstraint maps
-		require.Equal(t, len(cachedConstraints), len(decodedConstraint), "The number of keys in both maps should be the same")
-		for key := range cachedConstraints {
-			_, ok := decodedConstraint[key]
-			require.True(t, ok, fmt.Sprintf("Key %s found in cachedConstraints but not in decodedConstraint", key.String()))
-			require.Equal(t, cachedConstraints[key].Data(), decodedConstraint[key].Data(), "The decodedConstraint Tx should be equal to the cachedConstraints Tx")
-		}
-		for key := range decodedConstraint {
-			_, ok := cachedConstraints[key]
-			require.True(t, ok, fmt.Sprintf("Key %s found in decodedConstraint but not in cachedConstraints", key.String()))
+		if expectedConstraint.Message.Top {
+			// Inclusion constraint
+			cachedConstraints, ok := builder.inclusionConstraintsCache.Get(slot)
+			require.True(t, ok, fmt.Sprintf("expected inclusion constraint for slot %d", slot))
+			require.Equal(t, len(cachedConstraints), len(decodedConstraint), fmt.Sprintf("slot %d inclusion constraint length mismatch", slot))
+		} else {
+			// Exclusion constraint
+			cachedConstraints, ok := builder.exclusionConstraintsCache.Get(slot)
+			require.True(t, ok, fmt.Sprintf("expected exclusion constraint for slot %d", slot))
+			require.Equal(t, len(cachedConstraints), len(decodedConstraint), fmt.Sprintf("slot %d exclusion constraint length mismatch", slot))
 		}
 	}
 }

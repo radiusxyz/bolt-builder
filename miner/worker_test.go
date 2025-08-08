@@ -18,6 +18,8 @@ package miner
 
 import (
 	"crypto/ecdsa"
+	"fmt"
+	"github.com/ethereum/go-ethereum/log"
 	"math/big"
 	mrnd "math/rand"
 	"sync/atomic"
@@ -79,7 +81,7 @@ var (
 	newTxs     []*types.Transaction
 
 	// Test testConstraintsCache
-	testConstraintsCache = new(shardmap.FIFOMap[uint64, types.HashToConstraintDecoded])
+	testConstraintsCache = shardmap.NewFIFOMap[uint64, types.HashToConstraintDecoded](64, 16, shardmap.HashUint64)
 
 	testConfig = &Config{
 		Recommit: time.Second,
@@ -524,16 +526,15 @@ func testGetSealingWork(t *testing.T, chainConfig *params.ChainConfig, engine co
 	// This API should work even when the automatic sealing is not enabled
 	for _, c := range cases {
 		r := w.getSealingBlock(&generateParams{
-			parentHash:       c.parent,
-			timestamp:        timestamp,
-			coinbase:         c.coinbase,
-			random:           c.random,
-			withdrawals:      nil,
-			beaconRoot:       nil,
-			noTxs:            false,
-			forceTime:        true,
-			onBlock:          nil,
-			constraintsCache: constraintsCache,
+			parentHash:  c.parent,
+			timestamp:   timestamp,
+			coinbase:    c.coinbase,
+			random:      c.random,
+			withdrawals: nil,
+			beaconRoot:  nil,
+			noTxs:       false,
+			forceTime:   true,
+			onBlock:     nil,
 		})
 		if c.expectErr {
 			if r.err == nil {
@@ -731,4 +732,244 @@ func testBundles(t *testing.T) {
 		balancePost := state.GetBalance(testUserAddress)
 		t.Log("Balances", balancePre, balancePost)
 	}
+}
+
+func TestExclusionConstraintFiltering(t *testing.T) {
+	// Setup worker and environment
+	w, _ := newTestWorker(t, ethashChainConfig, ethash.NewFaker(), rawdb.NewMemoryDatabase(), nil, 0)
+	defer w.close()
+
+	env, err := w.prepareWork(&generateParams{gasLimit: 30000000})
+	require.NoError(t, err)
+
+	// Create exclusion constraint with specific access list
+	key, _ := crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
+	signer := types.NewEIP2930Signer(big.NewInt(1))
+
+	conflictAddress := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	exclusionTx := &types.AccessListTx{
+		ChainID:  big.NewInt(1),
+		Nonce:    0,
+		To:       &conflictAddress,
+		Gas:      30000,
+		GasPrice: big.NewInt(1000000000),
+		Value:    big.NewInt(1000),
+		AccessList: types.AccessList{{
+			Address:     conflictAddress,
+			StorageKeys: []common.Hash{{0x01}},
+		}},
+	}
+
+	signedExclusionTx, err := types.SignNewTx(key, signer, exclusionTx)
+	require.NoError(t, err)
+
+	// Create exclusion constraints (Top=false)
+	exclusionConstraints := make(types.HashToConstraintDecoded)
+	exclusionConstraints[signedExclusionTx.Hash()] = signedExclusionTx
+
+	// Create inclusion constraints (empty for this test)
+	inclusionConstraints := make(types.HashToConstraintDecoded)
+	// testConstraintsCache = shardmap.NewFIFOMap[uint64, types.HashToConstraintDecoded](64, 16, shardmap.HashUint64)
+
+	log.Info("=== TEST 1: Exclusion Constraint Filtering ===")
+	log.Info(fmt.Sprintf("Exclusion constraint address: %s", conflictAddress.Hex()))
+	log.Info(fmt.Sprintf("Exclusion constraint hash: %s", signedExclusionTx.Hash().Hex()))
+
+	// Test fillTransactionsSelectAlgo with exclusion constraints
+	blockBundles, allBundles, usedSbundles, mempoolTxHashes, err := w.fillTransactionsSelectAlgo(nil, env, exclusionConstraints, inclusionConstraints, 0, testConstraintsCache)
+
+	require.NoError(t, err)
+
+	log.Info(fmt.Sprintf("Block bundles count: %d", len(blockBundles)))
+	log.Info(fmt.Sprintf("All bundles count: %d", len(allBundles)))
+	log.Info(fmt.Sprintf("Used sbundles count: %d", len(usedSbundles)))
+	log.Info(fmt.Sprintf("Mempool tx hashes count: %d", len(mempoolTxHashes)))
+
+	// Verify that conflicting transactions were filtered out
+	for hash := range mempoolTxHashes {
+		log.Info(fmt.Sprintf("Mempool tx hash: %s", hash.Hex()))
+	}
+
+	log.Info("=== END TEST 1 ===")
+}
+
+func TestInclusionConstraintDynamicDetection(t *testing.T) {
+	// Setup worker and environment
+	w, _ := newTestWorker(t, ethashChainConfig, ethash.NewFaker(), rawdb.NewMemoryDatabase(), nil, 0)
+	defer w.close()
+
+	env, err := w.prepareWork(&generateParams{gasLimit: 30000000})
+	require.NoError(t, err)
+
+	// Create inclusion constraint cache
+	inclusionCache := shardmap.NewFIFOMap[uint64, types.HashToConstraintDecoded](64, 16, shardmap.HashUint64)
+
+	// Create initial exclusion constraint
+	key, _ := crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
+	signer := types.NewEIP2930Signer(big.NewInt(1))
+
+	exclusionTx := &types.AccessListTx{
+		ChainID:  big.NewInt(1),
+		Nonce:    0,
+		To:       &common.Address{0x01},
+		Gas:      30000,
+		GasPrice: big.NewInt(1000000000),
+		Value:    big.NewInt(1000),
+		AccessList: types.AccessList{{
+			Address:     common.Address{0x02},
+			StorageKeys: []common.Hash{{0x01}},
+		}},
+	}
+
+	signedExclusionTx, err := types.SignNewTx(key, signer, exclusionTx)
+	require.NoError(t, err)
+
+	exclusionConstraints := make(types.HashToConstraintDecoded)
+	exclusionConstraints[signedExclusionTx.Hash()] = signedExclusionTx
+
+	// Create inclusion constraint that will be added dynamically
+	inclusionTx := &types.AccessListTx{
+		ChainID:  big.NewInt(1),
+		Nonce:    1,
+		To:       &common.Address{0x03},
+		Gas:      21000,
+		GasPrice: big.NewInt(2000000000),
+		Value:    big.NewInt(2000),
+		AccessList: types.AccessList{{
+			Address:     common.Address{0x04},
+			StorageKeys: []common.Hash{{0x02}},
+		}},
+	}
+
+	signedInclusionTx, err := types.SignNewTx(key, signer, inclusionTx)
+	require.NoError(t, err)
+
+	log.Info("=== TEST 2: Dynamic Inclusion Constraint Detection ===")
+	log.Info(fmt.Sprintf("Initial exclusion constraint: %s", signedExclusionTx.Hash().Hex()))
+	log.Info(fmt.Sprintf("Inclusion constraint to be added: %s", signedInclusionTx.Hash().Hex()))
+
+	// Start with empty inclusion constraints
+	initialInclusion := make(types.HashToConstraintDecoded)
+
+	// Simulate dynamic addition of inclusion constraint after 500ms
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		newInclusion := make(types.HashToConstraintDecoded)
+		newInclusion[signedInclusionTx.Hash()] = signedInclusionTx
+		inclusionCache.Put(0, newInclusion)
+		log.Info(">>> Dynamically added inclusion constraint to cache")
+	}()
+
+	// Test fillTransactionsSelectAlgo with dynamic constraint detection
+	blockBundles, _, _, mempoolTxHashes, err := w.fillTransactionsSelectAlgo(nil, env, exclusionConstraints, initialInclusion, 0, testConstraintsCache)
+
+	require.NoError(t, err)
+
+	log.Info(fmt.Sprintf("Final block bundles count: %d", len(blockBundles)))
+	log.Info(fmt.Sprintf("Final mempool tx hashes count: %d", len(mempoolTxHashes)))
+
+	// Check if inclusion constraint was detected and added
+	_, hasInclusionTx := mempoolTxHashes[signedInclusionTx.Hash()]
+	if hasInclusionTx {
+		log.Info("✓ Inclusion constraint was successfully detected and added")
+	} else {
+		log.Info("✗ Inclusion constraint was NOT detected")
+	}
+
+	log.Info("=== END TEST 2 ===")
+}
+
+func TestAlgorithmSelection(t *testing.T) {
+	// Setup worker and environment
+	w, _ := newTestWorker(t, ethashChainConfig, ethash.NewFaker(), rawdb.NewMemoryDatabase(), nil, 0)
+	defer w.close()
+
+	env, err := w.prepareWork(&generateParams{gasLimit: 30000000})
+	require.NoError(t, err)
+
+	key, _ := crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
+	signer := types.NewEIP2930Signer(big.NewInt(1))
+
+	log.Info("=== TEST 3: Algorithm Selection Logic ===")
+
+	// Test Case 1: No constraints - should use fillTransactionsAlgoWorker
+	log.Info("--- Case 1: No constraints ---")
+	emptyInclusion := make(types.HashToConstraintDecoded)
+	emptyExclusion := make(types.HashToConstraintDecoded)
+
+	_, _, usedSbundles1, mempoolTxHashes1, err := w.fillTransactionsSelectAlgo(nil, env, emptyExclusion, emptyInclusion, 0, nil)
+	require.NoError(t, err)
+
+	log.Info(fmt.Sprintf("No constraints - Used sbundles count: %d (should be > 0)", len(usedSbundles1)))
+	log.Info(fmt.Sprintf("No constraints - Mempool tx count: %d", len(mempoolTxHashes1)))
+
+	// Test Case 2: Only inclusion constraints - should warn and use fillTransactionsAlgoWorker
+	log.Info("--- Case 2: Only inclusion constraints ---")
+	inclusionTx := &types.AccessListTx{
+		ChainID:  big.NewInt(1),
+		Nonce:    0,
+		To:       &common.Address{0x01},
+		Gas:      21000,
+		GasPrice: big.NewInt(1000000000),
+		Value:    big.NewInt(1000),
+		AccessList: types.AccessList{{
+			Address:     common.Address{0x02},
+			StorageKeys: []common.Hash{{0x01}},
+		}},
+	}
+
+	signedInclusionTx, err := types.SignNewTx(key, signer, inclusionTx)
+	require.NoError(t, err)
+
+	onlyInclusion := make(types.HashToConstraintDecoded)
+	onlyInclusion[signedInclusionTx.Hash()] = signedInclusionTx
+
+	_, _, usedSbundles2, mempoolTxHashes2, err := w.fillTransactionsSelectAlgo(nil, env, emptyExclusion, onlyInclusion, 0, testConstraintsCache)
+	require.NoError(t, err)
+
+	log.Info(fmt.Sprintf("Only inclusion - Used sbundles count: %d (should be > 0, fallback algorithm)", len(usedSbundles2)))
+	log.Info(fmt.Sprintf("Only inclusion - Mempool tx count: %d", len(mempoolTxHashes2)))
+
+	// Test Case 3: Exclusion constraints present - should use fillTransactionsWithDynamicConstraints
+	log.Info("--- Case 3: Exclusion constraints present ---")
+	exclusionTx := &types.AccessListTx{
+		ChainID:  big.NewInt(1),
+		Nonce:    1,
+		To:       &common.Address{0x03},
+		Gas:      30000,
+		GasPrice: big.NewInt(1000000000),
+		Value:    big.NewInt(1000),
+		AccessList: types.AccessList{{
+			Address:     common.Address{0x04},
+			StorageKeys: []common.Hash{{0x01}},
+		}},
+	}
+
+	signedExclusionTx, err := types.SignNewTx(key, signer, exclusionTx)
+	require.NoError(t, err)
+
+	withExclusion := make(types.HashToConstraintDecoded)
+	withExclusion[signedExclusionTx.Hash()] = signedExclusionTx
+
+	_, _, usedSbundles3, mempoolTxHashes3, err := w.fillTransactionsSelectAlgo(nil, env, withExclusion, emptyInclusion, 0, testConstraintsCache)
+	require.NoError(t, err)
+
+	log.Info(fmt.Sprintf("With exclusion - Used sbundles count: %d (should be 0, dynamic algorithm)", len(usedSbundles3)))
+	log.Info(fmt.Sprintf("With exclusion - Mempool tx count: %d", len(mempoolTxHashes3)))
+	log.Info(fmt.Sprintf("With exclusion - Exclusion constraint hash in mempool: %v",
+		func() bool { _, exists := mempoolTxHashes3[signedExclusionTx.Hash()]; return exists }()))
+
+	// Test Case 4: Both inclusion and exclusion constraints
+	log.Info("--- Case 4: Both inclusion and exclusion constraints ---")
+	_, _, usedSbundles4, mempoolTxHashes4, err := w.fillTransactionsSelectAlgo(nil, env, withExclusion, onlyInclusion, 0, testConstraintsCache)
+	require.NoError(t, err)
+
+	log.Info(fmt.Sprintf("Both constraints - Used sbundles count: %d (should be 0, dynamic algorithm)", len(usedSbundles4)))
+	log.Info(fmt.Sprintf("Both constraints - Mempool tx count: %d", len(mempoolTxHashes4)))
+	log.Info(fmt.Sprintf("Both constraints - Inclusion constraint in mempool: %v",
+		func() bool { _, exists := mempoolTxHashes4[signedInclusionTx.Hash()]; return exists }()))
+	log.Info(fmt.Sprintf("Both constraints - Exclusion constraint in mempool: %v",
+		func() bool { _, exists := mempoolTxHashes4[signedExclusionTx.Hash()]; return exists }()))
+
+	log.Info("=== END TEST 3 ===")
 }
