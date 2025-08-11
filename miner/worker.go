@@ -1430,6 +1430,7 @@ func (w *worker) fillTransactionsWithDynamicConstraints(interrupt *atomic.Int32,
 		usedSbundles    []types.UsedSBundle
 		mempoolTxHashes = make(map[common.Hash]struct{})
 	)
+
 	localTxs, remoteTxs := make(map[common.Address][]*txpool.LazyTransaction), filteredPending
 
 	for _, account := range w.eth.TxPool().Locals() {
@@ -1448,29 +1449,45 @@ func (w *worker) fillTransactionsWithDynamicConstraints(interrupt *atomic.Int32,
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 
-	inclusionDetected := false
+	inclusionDetected := make(chan bool, 1)
+	constraintError := make(chan error, 1)
+	newInclusionTxs := make(chan []*types.Transaction, 1)
 
 	go func() {
+		defer close(inclusionDetected)
+		defer close(constraintError)
+		defer close(newInclusionTxs)
+
+		fmt.Printf("MONITORING: Starting inclusion constraint detection for slot %d\n", slot)
+
 		for {
 			select {
 			case <-ticker.C:
 				if inclusionCache != nil {
 					currentInclusion, _ := inclusionCache.Get(slot)
-					if len(currentInclusion) > len(initialInclusion) {
-						log.Info(fmt.Sprintf("Detected new inclusion constraints: %d -> %d", len(initialInclusion), len(currentInclusion)))
+					fmt.Printf("CHECKING: Current=%d inclusion constraints\n", len(currentInclusion))
 
-						err := w.insertInclusionConstraints(env, currentInclusion)
-						if err != nil {
-							log.Error("Failed to insert inclusion constraints", "err", err)
-							return
+					if len(currentInclusion) > 0 {
+						fmt.Printf("DETECTED: Found inclusion constraints to process!\n")
+						log.Info(fmt.Sprintf("Processing %d inclusion constraints for slot %d", len(currentInclusion), slot))
+
+						allInclusionTxs := make([]*types.Transaction, 0)
+						for hash, tx := range currentInclusion {
+							allInclusionTxs = append(allInclusionTxs, tx)
+							fmt.Printf("PROCESSING INCLUSION: %s -> %s\n", hash.Hex(), tx.To().Hex())
 						}
 
-						inclusionDetected = true
+						if len(allInclusionTxs) > 0 {
+							newInclusionTxs <- allInclusionTxs
+						}
+
+						inclusionDetected <- true
 						return
 					}
 				}
 			default:
 				if interrupt != nil && interrupt.Load() != 0 {
+					fmt.Printf("INTERRUPTED: Constraint detection interrupted\n")
 					return
 				}
 			}
@@ -1478,6 +1495,7 @@ func (w *worker) fillTransactionsWithDynamicConstraints(interrupt *atomic.Int32,
 	}()
 
 	if len(localTxs) > 0 {
+		fmt.Printf("PROCESSING: %d local transaction accounts (filtered)\n", len(localTxs))
 		plainTxs := newTransactionsByPriceAndNonce(env.signer, localTxs, nil, nil, env.header.BaseFee)
 		blobTxs := newTransactionsByPriceAndNonce(env.signer, nil, nil, nil, env.header.BaseFee)
 
@@ -1486,8 +1504,52 @@ func (w *worker) fillTransactionsWithDynamicConstraints(interrupt *atomic.Int32,
 		}
 	}
 
-	if inclusionDetected {
-		log.Info("Inclusion constraint detected, switching to normal block building")
+	constraintDetected := false
+	select {
+	case detected := <-inclusionDetected:
+		if detected {
+			fmt.Printf("INCLUSION DETECTED: Processing and switching to normal block building\n")
+
+			select {
+			case newTxs := <-newInclusionTxs:
+				fmt.Printf("ADDING: %d inclusion constraint transactions\n", len(newTxs))
+
+				// inclusion 트랜잭션들을 직접 커밋
+				for _, tx := range newTxs {
+					env.state.SetTxContext(tx.Hash(), env.tcount)
+
+					logs, err := w.commitTransaction(env, tx)
+					if err != nil {
+						fmt.Printf("FAILED to commit inclusion constraint %s: %v\n", tx.Hash().Hex(), err)
+						log.Error("Failed to commit inclusion constraint", "hash", tx.Hash(), "err", err)
+						continue
+					}
+
+					env.tcount++
+					fmt.Printf("COMMITTED: Inclusion constraint %s at index %d\n", tx.Hash().Hex(), env.tcount-1)
+
+					if !w.isRunning() && len(logs) > 0 {
+						cpy := make([]*types.Log, len(logs))
+						for i, l := range logs {
+							cpy[i] = new(types.Log)
+							*cpy[i] = *l
+						}
+						w.pendingLogsFeed.Send(cpy)
+					}
+				}
+			default:
+			}
+			constraintDetected = true
+		}
+	case err := <-constraintError:
+		return nil, nil, nil, nil, fmt.Errorf("constraint processing failed: %w", err)
+	case <-time.After(100 * time.Millisecond):
+		fmt.Printf("TIMEOUT: No new inclusion constraints detected\n")
+	}
+
+	if constraintDetected {
+		fmt.Printf("SWITCHING: Filtering removed, switching to normal block building\n")
+
 		remainingBundles, remainingAllBundles, remainingUsedSbundles, remainingMempoolTxHashes, err := w.fillTransactionsAlgoWorker(interrupt, env)
 		if err != nil {
 			return nil, nil, nil, nil, err
@@ -1500,6 +1562,8 @@ func (w *worker) fillTransactionsWithDynamicConstraints(interrupt *atomic.Int32,
 			mempoolTxHashes[hash] = struct{}{}
 		}
 	} else {
+		fmt.Printf("CONTINUING: No inclusion detected, processing filtered remote transactions\n")
+
 		if len(remoteTxs) > 0 {
 			plainTxs := newTransactionsByPriceAndNonce(env.signer, remoteTxs, nil, nil, env.header.BaseFee)
 			blobTxs := newTransactionsByPriceAndNonce(env.signer, nil, nil, nil, env.header.BaseFee)
@@ -1511,36 +1575,6 @@ func (w *worker) fillTransactionsWithDynamicConstraints(interrupt *atomic.Int32,
 	}
 
 	return blockBundles, allBundles, usedSbundles, mempoolTxHashes, nil
-}
-
-func (w *worker) insertInclusionConstraints(env *environment, inclusionConstraints types.HashToConstraintDecoded) error {
-	log.Info(fmt.Sprintf("Inserting %d inclusion constraints", len(inclusionConstraints)))
-
-	constraintsOrderedByNonceAndHashDesc, _, _ := types.ParseConstraintsDecoded(inclusionConstraints)
-
-	for _, tx := range constraintsOrderedByNonceAndHashDesc {
-		env.state.SetTxContext(tx.Hash(), env.tcount)
-
-		logs, err := w.commitTransaction(env, tx)
-		if err != nil {
-			log.Error("Failed to commit inclusion constraint", "hash", tx.Hash(), "err", err)
-			return err
-		}
-
-		env.tcount++
-		log.Info(fmt.Sprintf("Successfully inserted inclusion constraint %s at index %d", tx.Hash().String(), env.tcount-1))
-
-		if !w.isRunning() && len(logs) > 0 {
-			cpy := make([]*types.Log, len(logs))
-			for i, l := range logs {
-				cpy[i] = new(types.Log)
-				*cpy[i] = *l
-			}
-			w.pendingLogsFeed.Send(cpy)
-		}
-	}
-
-	return nil
 }
 
 // fillTransactions retrieves the pending transactions from the txpool and fills them
