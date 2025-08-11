@@ -1377,18 +1377,31 @@ func (w *worker) fillTransactionsSelectAlgo(interrupt *atomic.Int32, env *enviro
 	inclusionConstraintDetectionTime time.Time,
 ) ([]types.SimulatedBundle, []types.SimulatedBundle, []types.UsedSBundle, map[common.Hash]struct{}, error) {
 
+	var (
+		blockBundles    []types.SimulatedBundle
+		allBundles      []types.SimulatedBundle
+		usedSbundles    []types.UsedSBundle
+		mempoolTxHashes map[common.Hash]struct{}
+		err             error
+	)
+
+	fmt.Printf("[🐛 DEBUG] fillTransactionsSelectAlgo: inclusion=%d, exclusion=%d, slot=%d",   
+        len(inclusionConstraints), len(exclusionConstraints), slot)
+
 	if len(exclusionConstraints) > 0 {
+		fmt.Printf("[🐛 DEBUG] Taking fillTransactionsWithTimeConstraints path")  
 		return w.fillTransactionsWithTimeConstraints(interrupt, env,
 			inclusionConstraints, exclusionConstraints, inclusionConstraintDetectionTime)
 	} else if len(inclusionConstraints) > 0 {
 		// inclusion only - We assume that inclusion is valid if exclusion has been detected in advance
-		log.Warn(fmt.Sprintf("Inclusion constraints found (%d) but no exclusion constraints with Lock information for slot %d. Falling back to default algorithm.",
-			len(inclusionConstraints), slot))
-		return w.fillTransactionsAlgoWorker(interrupt, env)
+		fmt.Printf("[🐛 DEBUG] Taking fillTransactionsAlgoWorker path (inclusion only)")  
+		blockBundles, allBundles, mempoolTxHashes, err = w.fillTransactions(interrupt, env, inclusionConstraints)
 	} else {
-		// nothing
+		fmt.Printf("[🐛 DEBUG] Taking fillTransactionsAlgoWorker path (no constraints)") 
 		return w.fillTransactionsAlgoWorker(interrupt, env)
 	}
+
+	return blockBundles, allBundles, usedSbundles, mempoolTxHashes, err
 }
 
 func (w *worker) fillTransactionsWithTimeConstraints(interrupt *atomic.Int32, env *environment,
@@ -1410,11 +1423,12 @@ func (w *worker) fillTransactionsWithTimeConstraints(interrupt *atomic.Int32, en
 
 	// Add constraint hashes to mempool hashes
 	for hash := range inclusionConstraints {
+		fmt.Printf("[🐛 DEBUG] Adding constraint hash to mempool: %s", hash.Hex())
 		mempoolTxHashes[hash] = struct{}{}
 	}
-	for hash := range exclusionConstraints {
-		mempoolTxHashes[hash] = struct{}{}
-	}
+	// for hash := range exclusionConstraints {
+	// 	mempoolTxHashes[hash] = struct{}{}
+	// }
 
 	blobTxs := newTransactionsByPriceAndNonce(env.signer, nil, nil, nil, env.header.BaseFee)
 
@@ -1598,192 +1612,6 @@ func mergeTxMaps(map1, map2 map[common.Address][]*txpool.LazyTransaction) map[co
 	return merged
 }
 
-func (w *worker) filterTxPoolByExclusionConstraints(exclusionConstraints types.HashToConstraintDecoded) map[common.Address][]*txpool.LazyTransaction {
-	conflictingAddresses := make(map[common.Address]struct{})
-
-	for _, tx := range exclusionConstraints {
-		if accessList := tx.AccessList(); accessList != nil {
-			for _, access := range accessList {
-				conflictingAddresses[access.Address] = struct{}{}
-			}
-		}
-	}
-
-	w.mu.RLock()
-	tip := w.tip
-	w.mu.RUnlock()
-
-	filter := txpool.PendingFilter{MinTip: tip}
-	allPending := w.eth.TxPool().Pending(filter)
-	filteredPending := make(map[common.Address][]*txpool.LazyTransaction)
-	for addr, txs := range allPending {
-		if _, conflicts := conflictingAddresses[addr]; !conflicts {
-			filteredPending[addr] = txs
-		}
-	}
-
-	return filteredPending
-}
-
-func (w *worker) fillTransactionsWithDynamicConstraints(interrupt *atomic.Int32, env *environment,
-	filteredPending map[common.Address][]*txpool.LazyTransaction,
-	initialInclusion types.HashToConstraintDecoded,
-	slot uint64,
-	inclusionCache *shardmap.FIFOMap[uint64, types.HashToConstraintDecoded]) ([]types.SimulatedBundle, []types.SimulatedBundle, []types.UsedSBundle, map[common.Hash]struct{}, error) {
-
-	var (
-		blockBundles    []types.SimulatedBundle
-		allBundles      []types.SimulatedBundle
-		usedSbundles    []types.UsedSBundle
-		mempoolTxHashes = make(map[common.Hash]struct{})
-	)
-
-	localTxs, remoteTxs := make(map[common.Address][]*txpool.LazyTransaction), filteredPending
-
-	for _, account := range w.eth.TxPool().Locals() {
-		if txs := remoteTxs[account]; len(txs) > 0 {
-			delete(remoteTxs, account)
-			localTxs[account] = txs
-		}
-	}
-
-	for _, txs := range filteredPending {
-		for _, tx := range txs {
-			mempoolTxHashes[tx.Hash] = struct{}{}
-		}
-	}
-
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
-
-	inclusionDetected := make(chan bool, 1)
-	constraintError := make(chan error, 1)
-	newInclusionTxs := make(chan []*types.Transaction, 1)
-
-	go func() {
-		defer close(inclusionDetected)
-		defer close(constraintError)
-		defer close(newInclusionTxs)
-
-		fmt.Printf("MONITORING: Starting inclusion constraint detection for slot %d\n", slot)
-
-		for {
-			select {
-			case <-ticker.C:
-				if inclusionCache != nil {
-					currentInclusion, _ := inclusionCache.Get(slot)
-					fmt.Printf("CHECKING: Current=%d inclusion constraints\n", len(currentInclusion))
-
-					if len(currentInclusion) > 0 {
-						fmt.Printf("DETECTED: Found inclusion constraints to process!\n")
-						log.Info(fmt.Sprintf("Processing %d inclusion constraints for slot %d", len(currentInclusion), slot))
-
-						allInclusionTxs := make([]*types.Transaction, 0)
-						for hash, tx := range currentInclusion {
-							allInclusionTxs = append(allInclusionTxs, tx)
-							fmt.Printf("PROCESSING INCLUSION: %s -> %s\n", hash.Hex(), tx.To().Hex())
-						}
-
-						if len(allInclusionTxs) > 0 {
-							newInclusionTxs <- allInclusionTxs
-						}
-
-						inclusionDetected <- true
-						return
-					}
-				}
-			default:
-				if interrupt != nil && interrupt.Load() != 0 {
-					fmt.Printf("INTERRUPTED: Constraint detection interrupted\n")
-					return
-				}
-			}
-		}
-	}()
-
-	if len(localTxs) > 0 {
-		fmt.Printf("PROCESSING: %d local transaction accounts (filtered)\n", len(localTxs))
-		plainTxs := newTransactionsByPriceAndNonce(env.signer, localTxs, nil, nil, env.header.BaseFee)
-		blobTxs := newTransactionsByPriceAndNonce(env.signer, nil, nil, nil, env.header.BaseFee)
-
-		if err := w.commitTransactions(env, plainTxs, blobTxs, nil, interrupt); err != nil {
-			return nil, nil, nil, nil, err
-		}
-	}
-
-	constraintDetected := false
-	select {
-	case detected := <-inclusionDetected:
-		if detected {
-			fmt.Printf("INCLUSION DETECTED: Processing and switching to normal block building\n")
-
-			select {
-			case newTxs := <-newInclusionTxs:
-				fmt.Printf("ADDING: %d inclusion constraint transactions\n", len(newTxs))
-
-				// inclusion 트랜잭션들을 직접 커밋
-				for _, tx := range newTxs {
-					env.state.SetTxContext(tx.Hash(), env.tcount)
-
-					logs, err := w.commitTransaction(env, tx)
-					if err != nil {
-						fmt.Printf("FAILED to commit inclusion constraint %s: %v\n", tx.Hash().Hex(), err)
-						log.Error("Failed to commit inclusion constraint", "hash", tx.Hash(), "err", err)
-						continue
-					}
-
-					env.tcount++
-					fmt.Printf("COMMITTED: Inclusion constraint %s at index %d\n", tx.Hash().Hex(), env.tcount-1)
-
-					if !w.isRunning() && len(logs) > 0 {
-						cpy := make([]*types.Log, len(logs))
-						for i, l := range logs {
-							cpy[i] = new(types.Log)
-							*cpy[i] = *l
-						}
-						w.pendingLogsFeed.Send(cpy)
-					}
-				}
-			default:
-			}
-			constraintDetected = true
-		}
-	case err := <-constraintError:
-		return nil, nil, nil, nil, fmt.Errorf("constraint processing failed: %w", err)
-	case <-time.After(100 * time.Millisecond):
-		fmt.Printf("TIMEOUT: No new inclusion constraints detected\n")
-	}
-
-	if constraintDetected {
-		fmt.Printf("SWITCHING: Filtering removed, switching to normal block building\n")
-
-		remainingBundles, remainingAllBundles, remainingUsedSbundles, remainingMempoolTxHashes, err := w.fillTransactionsAlgoWorker(interrupt, env)
-		if err != nil {
-			return nil, nil, nil, nil, err
-		}
-
-		blockBundles = append(blockBundles, remainingBundles...)
-		allBundles = append(allBundles, remainingAllBundles...)
-		usedSbundles = append(usedSbundles, remainingUsedSbundles...)
-		for hash := range remainingMempoolTxHashes {
-			mempoolTxHashes[hash] = struct{}{}
-		}
-	} else {
-		fmt.Printf("CONTINUING: No inclusion detected, processing filtered remote transactions\n")
-
-		if len(remoteTxs) > 0 {
-			plainTxs := newTransactionsByPriceAndNonce(env.signer, remoteTxs, nil, nil, env.header.BaseFee)
-			blobTxs := newTransactionsByPriceAndNonce(env.signer, nil, nil, nil, env.header.BaseFee)
-
-			if err := w.commitTransactions(env, plainTxs, blobTxs, nil, interrupt); err != nil {
-				return nil, nil, nil, nil, err
-			}
-		}
-	}
-
-	return blockBundles, allBundles, usedSbundles, mempoolTxHashes, nil
-}
-
 // fillTransactions retrieves the pending transactions from the txpool and fills them
 // into the given sealing block. The transaction selection and ordering strategy can
 // be customized with the plugin in the future.
@@ -1807,6 +1635,7 @@ func (w *worker) fillTransactions(interrupt *atomic.Int32, env *environment, con
 	// NOTE: as done with builder txs, we need to fill mempoolTxHashes with the constraints hashes
 	// in order to pass block validation
 	for hash := range constraints {
+		fmt.Printf("[🐛 DEBUG] Adding constraint hash to mempool: %s", hash.Hex())
 		mempoolTxHashes[hash] = struct{}{}
 	}
 
@@ -2100,10 +1929,10 @@ func (w *worker) generateWork(params *generateParams) *newPayloadResult {
 			totalSbundles++
 		}
 
-		log.Info("🔥 Block finalized and assembled",
-			"height", block.Number().String(), "blockProfit", ethIntToFloat(uint256.MustFromBig(profit)),
-			"txs", len(env.txs), "bundles", len(blockBundles), "okSbundles", okSbundles, "totalSbundles", totalSbundles,
-			"gasUsed", block.GasUsed(), "time", time.Since(start))
+		fmt.Printf("🔥 Block finalized and assembled: height=%s blockProfit=%v txs=%d bundles=%d okSbundles=%d totalSbundles=%d gasUsed=%d time=%v\n",
+			block.Number().String(), ethIntToFloat(uint256.MustFromBig(profit)),
+			len(env.txs), len(blockBundles), okSbundles, totalSbundles,
+			block.GasUsed(), time.Since(start))
 		if metrics.EnabledBuilder {
 			buildBlockTimer.Update(time.Since(start))
 			blockProfitHistogram.Update(profit.Int64())
@@ -2157,10 +1986,10 @@ func (w *worker) generateWork(params *generateParams) *newPayloadResult {
 		len(inclusionConstraints), len(exclusionConstraints), params.slot))
 
 	for h, c := range inclusionConstraints {
-		log.Info("⭐️ Inclusion constraint detail", "hash", h, "constraint", c)
+		fmt.Printf("⭐️ Inclusion constraint detail: hash=%v constraint=%v\n", h, c)
 	}
 	for h, c := range exclusionConstraints {
-		log.Info("⭐️ Exclusion constraint detail", "hash", h, "constraint", c)
+		fmt.Printf("⭐️ Exclusion constraint detail: hash=%v constraint=%v\n", h, c)
 	}
 
 	blockBundles, allBundles, usedSbundles, mempoolTxHashes, err := w.fillTransactionsSelectAlgo(
@@ -2183,6 +2012,7 @@ func (w *worker) generateWork(params *generateParams) *newPayloadResult {
 	// in order to pass block validation. Otherwise the constraints will be rejected as unknown
 	// because they not part of the mempool and not part of the known bundles
 	for hash := range inclusionConstraints {
+		log.Info(fmt.Sprintf("[🐛 DEBUG] Adding constraint hash to mempool: %s", hash.Hex()))  
 		mempoolTxHashes[hash] = struct{}{}
 	}
 

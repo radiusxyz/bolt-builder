@@ -383,6 +383,13 @@ func (b *Builder) subscribeToRelayForConstraints(relayBaseEndpoint string) error
 			log.Info(fmt.Sprintf("Received %d new constraints", len(constraintsSigned)))
 
 			for _, constraint := range constraintsSigned {
+
+				log.Info(fmt.Sprintf("[🔍 CONSTRAINT] Slot=%d, Top=%v, TxCount=%d",   
+				constraint.Message.Slot, constraint.Message.Top, len(constraint.Message.Transactions)))  
+				for i, tx := range constraint.Message.Transactions {  
+					log.Info(fmt.Sprintf("[🔍 TX Info] Slot=%d, Top=%v, TxIndex=%d, Hash=%s",   
+						constraint.Message.Slot, constraint.Message.Top, i, tx.Hash().Hex()))  
+				}  
 				if b.verifyConstraints {
 					found := false
 					for _, pubkey := range b.slotConstraintsPubkeys {
@@ -401,40 +408,49 @@ func (b *Builder) subscribeToRelayForConstraints(relayBaseEndpoint string) error
 						log.Error("Failed to verify constraint signature", "err", err)
 						continue
 					}
+					
 				}
+				
 
 				decodedConstraints, err := DecodeConstraints(constraint)
 				if err != nil {
 					log.Error("Failed to decode constraint: ", err)
 					continue
 				}
+
+				log.Info(fmt.Sprintf("[🔍 DECODE DEBUG] Decoded constraint: slot=%d, top=%v, txCount=%d", constraint.Message.Slot, constraint.Message.Top, len(decodedConstraints)))  
 				// Take the lock to update the constraints cache: both `Get` and `Put` must be done by the same entity
 				b.updateConstraintsCacheLock.Lock()
 				if constraint.Message.Top {
 					// Inclusion constraint
+					log.Info(fmt.Sprintf("[🔍 CACHE] Storing INCLUSION constraint: Slot=%d, TxCount=%d",constraint.Message.Slot, len(decodedConstraints)))  
 
 					slotConstraints, _ := b.inclusionConstraintsCache.Get(constraint.Message.Slot)
 					if len(slotConstraints) == 0 {
 						b.inclusionConstraintsCache.Put(constraint.Message.Slot, decodedConstraints)
 					} else {
 						for hash := range decodedConstraints {
+							log.Info(fmt.Sprintf("[🔍 CACHE] Adding INCLUSION constraint hash: %s", hash.Hex()))  
 							slotConstraints[hash] = decodedConstraints[hash]
 						}
 						b.inclusionConstraintsCache.Put(constraint.Message.Slot, slotConstraints)
 					}
 				} else {
 					// Exclusion constraint
+					log.Info(fmt.Sprintf("[🔍 CACHE] Storing EXCLUSION constraint: Slot=%d, TxCount=%d",constraint.Message.Slot, len(decodedConstraints)))  
 					slotConstraints, _ := b.exclusionConstraintsCache.Get(constraint.Message.Slot)
 					if len(slotConstraints) == 0 {
 						b.exclusionConstraintsCache.Put(constraint.Message.Slot, decodedConstraints)
 					} else {
 						for hash := range decodedConstraints {
+							log.Info(fmt.Sprintf("[🔍 CACHE] Adding EXCLUSION constraint hash: %s", hash.Hex()))  
 							slotConstraints[hash] = decodedConstraints[hash]
 						}
 						b.exclusionConstraintsCache.Put(constraint.Message.Slot, slotConstraints)
 					}
 				}
 				b.updateConstraintsCacheLock.Unlock()
+				
 			}
 		}
 	}
