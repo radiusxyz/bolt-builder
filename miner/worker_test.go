@@ -775,8 +775,10 @@ func TestExclusionConstraintFiltering(t *testing.T) {
 	log.Info(fmt.Sprintf("Exclusion constraint address: %s", conflictAddress.Hex()))
 	log.Info(fmt.Sprintf("Exclusion constraint hash: %s", signedExclusionTx.Hash().Hex()))
 
+	var inclusionConstraintDetectionTime = time.Now()
+
 	// Test fillTransactionsSelectAlgo with exclusion constraints
-	blockBundles, allBundles, usedSbundles, mempoolTxHashes, err := w.fillTransactionsSelectAlgo(nil, env, exclusionConstraints, inclusionConstraints, 0, testConstraintsCache)
+	blockBundles, allBundles, usedSbundles, mempoolTxHashes, err := w.fillTransactionsSelectAlgo(nil, env, exclusionConstraints, inclusionConstraints, 0, inclusionConstraintDetectionTime)
 
 	require.NoError(t, err)
 
@@ -861,7 +863,7 @@ func TestInclusionConstraintDynamicDetection(t *testing.T) {
 	}()
 
 	// Test fillTransactionsSelectAlgo with dynamic constraint detection
-	blockBundles, _, _, mempoolTxHashes, err := w.fillTransactionsSelectAlgo(nil, env, exclusionConstraints, initialInclusion, 0, testConstraintsCache)
+	blockBundles, _, _, mempoolTxHashes, err := w.fillTransactionsSelectAlgo(nil, env, exclusionConstraints, initialInclusion, 0, time.Time{})
 
 	require.NoError(t, err)
 
@@ -897,7 +899,7 @@ func TestAlgorithmSelection(t *testing.T) {
 	emptyInclusion := make(types.HashToConstraintDecoded)
 	emptyExclusion := make(types.HashToConstraintDecoded)
 
-	_, _, usedSbundles1, mempoolTxHashes1, err := w.fillTransactionsSelectAlgo(nil, env, emptyExclusion, emptyInclusion, 0, nil)
+	_, _, usedSbundles1, mempoolTxHashes1, err := w.fillTransactionsSelectAlgo(nil, env, emptyExclusion, emptyInclusion, 0, time.Time{})
 	require.NoError(t, err)
 
 	log.Info(fmt.Sprintf("No constraints - Used sbundles count: %d (should be > 0)", len(usedSbundles1)))
@@ -924,7 +926,9 @@ func TestAlgorithmSelection(t *testing.T) {
 	onlyInclusion := make(types.HashToConstraintDecoded)
 	onlyInclusion[signedInclusionTx.Hash()] = signedInclusionTx
 
-	_, _, usedSbundles2, mempoolTxHashes2, err := w.fillTransactionsSelectAlgo(nil, env, emptyExclusion, onlyInclusion, 0, testConstraintsCache)
+	var OnlyInclusionConstraintDetectionTime = time.Now()
+
+	_, _, usedSbundles2, mempoolTxHashes2, err := w.fillTransactionsSelectAlgo(nil, env, emptyExclusion, onlyInclusion, 0, OnlyInclusionConstraintDetectionTime)
 	require.NoError(t, err)
 
 	log.Info(fmt.Sprintf("Only inclusion - Used sbundles count: %d (should be > 0, fallback algorithm)", len(usedSbundles2)))
@@ -951,7 +955,7 @@ func TestAlgorithmSelection(t *testing.T) {
 	withExclusion := make(types.HashToConstraintDecoded)
 	withExclusion[signedExclusionTx.Hash()] = signedExclusionTx
 
-	_, _, usedSbundles3, mempoolTxHashes3, err := w.fillTransactionsSelectAlgo(nil, env, withExclusion, emptyInclusion, 0, testConstraintsCache)
+	_, _, usedSbundles3, mempoolTxHashes3, err := w.fillTransactionsSelectAlgo(nil, env, withExclusion, emptyInclusion, 0, time.Time{})
 	require.NoError(t, err)
 
 	log.Info(fmt.Sprintf("With exclusion - Used sbundles count: %d (should be 0, dynamic algorithm)", len(usedSbundles3)))
@@ -959,9 +963,11 @@ func TestAlgorithmSelection(t *testing.T) {
 	log.Info(fmt.Sprintf("With exclusion - Exclusion constraint hash in mempool: %v",
 		func() bool { _, exists := mempoolTxHashes3[signedExclusionTx.Hash()]; return exists }()))
 
+	var inclusionConstraintDetectionTime = time.Now()
+
 	// Test Case 4: Both inclusion and exclusion constraints
 	log.Info("--- Case 4: Both inclusion and exclusion constraints ---")
-	_, _, usedSbundles4, mempoolTxHashes4, err := w.fillTransactionsSelectAlgo(nil, env, withExclusion, onlyInclusion, 0, testConstraintsCache)
+	_, _, usedSbundles4, mempoolTxHashes4, err := w.fillTransactionsSelectAlgo(nil, env, withExclusion, onlyInclusion, 0, inclusionConstraintDetectionTime)
 	require.NoError(t, err)
 
 	log.Info(fmt.Sprintf("Both constraints - Used sbundles count: %d (should be 0, dynamic algorithm)", len(usedSbundles4)))
@@ -1033,7 +1039,7 @@ func TestInclusionExclusionConstraintApplication(t *testing.T) {
 		ChainID:  big.NewInt(1),
 		Nonce:    2,
 		To:       &common.Address{0x05},
-		Gas:      21000,
+		Gas:      30000,
 		GasPrice: big.NewInt(1500000000), // Medium gas price
 		Value:    big.NewInt(500),
 	}
