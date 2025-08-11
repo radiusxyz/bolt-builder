@@ -2100,7 +2100,7 @@ func (w *worker) generateWork(params *generateParams) *newPayloadResult {
 			totalSbundles++
 		}
 
-		log.Info("Block finalized and assembled",
+		log.Info("🔥 Block finalized and assembled",
 			"height", block.Number().String(), "blockProfit", ethIntToFloat(uint256.MustFromBig(profit)),
 			"txs", len(env.txs), "bundles", len(blockBundles), "okSbundles", okSbundles, "totalSbundles", totalSbundles,
 			"gasUsed", block.GasUsed(), "time", time.Since(start))
@@ -2132,6 +2132,12 @@ func (w *worker) generateWork(params *generateParams) *newPayloadResult {
 		return &newPayloadResult{err: err}
 	}
 
+	log.Info("Proposer tx prepared",
+		"paymentTxReserve", paymentTxReserve != nil,
+		"workTxCount", len(work.txs),
+		"coinbase", w.coinbase,
+	)
+
 	orderCloseTime := time.Now()
 
 	var inclusionConstraints types.HashToConstraintDecoded
@@ -2150,12 +2156,28 @@ func (w *worker) generateWork(params *generateParams) *newPayloadResult {
 	log.Info(fmt.Sprintf("%d inclusion and %d exclusion constraints for slot %d",
 		len(inclusionConstraints), len(exclusionConstraints), params.slot))
 
+	for h, c := range inclusionConstraints {
+		log.Info("⭐️ Inclusion constraint detail", "hash", h, "constraint", c)
+	}
+	for h, c := range exclusionConstraints {
+		log.Info("⭐️ Exclusion constraint detail", "hash", h, "constraint", c)
+	}
+
 	blockBundles, allBundles, usedSbundles, mempoolTxHashes, err := w.fillTransactionsSelectAlgo(
 		nil, work, inclusionConstraints, exclusionConstraints, params.slot,
 		inclusionConstraintDetectionTime)
 	if err != nil {
 		return &newPayloadResult{err: err}
 	}
+
+	// 추가: fillTransactionsSelectAlgo 결과 로그
+	log.Info("Transaction selection result",
+		"blockBundles", len(blockBundles),
+		"allBundles", len(allBundles),
+		"usedSbundles", len(usedSbundles),
+		"mempoolTxCount", len(mempoolTxHashes),
+		"workTxCount", len(work.txs),
+	)
 
 	// NOTE: as done with builder txs, we need to fill mempoolTxHashes with the constraints hashes
 	// in order to pass block validation. Otherwise the constraints will be rejected as unknown
