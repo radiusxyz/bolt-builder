@@ -974,3 +974,182 @@ func TestAlgorithmSelection(t *testing.T) {
 	log.Info("=== END TEST 3 ===")
 }
 
+func TestInclusionExclusionConstraintApplication(t *testing.T) {
+
+	// Create constraint transactions
+	key, _ := crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
+	signer := types.NewEIP2930Signer(big.NewInt(1))
+
+	constraintSender := crypto.PubkeyToAddress(key.PublicKey)
+
+	// Create genesis allocation with funded accounts
+	genesisAlloc := types.GenesisAlloc{
+		constraintSender: {
+			Balance: big.NewInt(1000000000000000000), // 1 ETH
+			Nonce:   0,
+		},
+		// Include other test accounts as needed
+		testBankAddress: {Balance: testBankFunds}, // From existing test setup
+	}
+
+	// Setup worker with custom genesis allocation
+	w, _ := newTestWorker(t, ethashChainConfig, ethash.NewFaker(), rawdb.NewMemoryDatabase(), genesisAlloc, 0)
+	defer w.close()
+
+	// Create inclusion constraint transaction (MUST be included)
+	inclusionTx := &types.AccessListTx{
+		ChainID:  big.NewInt(1),
+		Nonce:    0,
+		To:       &common.Address{0x03},
+		Gas:      30000,
+		GasPrice: big.NewInt(2000000000), // High gas price
+		Value:    big.NewInt(2000),
+		AccessList: types.AccessList{{
+			Address:     common.Address{0x04},
+			StorageKeys: []common.Hash{{0x02}},
+		}},
+	}
+	signedInclusionTx, err := types.SignNewTx(key, signer, inclusionTx)
+	require.NoError(t, err)
+
+	// Create exclusion constraint transaction (MUST be excluded)
+	exclusionTx := &types.AccessListTx{
+		ChainID:  big.NewInt(1),
+		Nonce:    0,
+		To:       &common.Address{0x01},
+		Gas:      30000,
+		GasPrice: big.NewInt(3000000000), // Even higher gas price but should be excluded
+		Value:    big.NewInt(1000),
+		AccessList: types.AccessList{{
+			Address:     common.Address{0x02},
+			StorageKeys: []common.Hash{{0x01}},
+		}},
+	}
+	signedExclusionTx, err := types.SignNewTx(key, signer, exclusionTx)
+	require.NoError(t, err)
+
+	// Create regular mempool transaction for comparison
+	regularTx := &types.AccessListTx{
+		ChainID:  big.NewInt(1),
+		Nonce:    2,
+		To:       &common.Address{0x05},
+		Gas:      21000,
+		GasPrice: big.NewInt(1500000000), // Medium gas price
+		Value:    big.NewInt(500),
+	}
+	signedRegularTx, err := types.SignNewTx(key, signer, regularTx)
+	require.NoError(t, err)
+
+	// Add regular transaction to mempool
+	w.eth.TxPool().Add([]*types.Transaction{signedRegularTx}, true, false, false)
+
+	// Create separate constraint caches
+	inclusionConstraintsCache := shardmap.NewFIFOMap[uint64, types.HashToConstraintDecoded](64, 16, shardmap.HashUint64)
+	exclusionConstraintsCache := shardmap.NewFIFOMap[uint64, types.HashToConstraintDecoded](64, 16, shardmap.HashUint64)
+
+	slot := uint64(10)
+
+	// Add inclusion constraint
+	inclusionConstraints := make(types.HashToConstraintDecoded)
+	inclusionConstraints[signedInclusionTx.Hash()] = signedInclusionTx
+	inclusionConstraintsCache.Put(slot, inclusionConstraints)
+
+	// Add exclusion constraint
+	exclusionConstraints := make(types.HashToConstraintDecoded)
+	exclusionConstraints[signedExclusionTx.Hash()] = signedExclusionTx
+	exclusionConstraintsCache.Put(slot, exclusionConstraints)
+
+	fmt.Printf("=== TESTING CONSTRAINT APPLICATION ===\n")
+	fmt.Printf("Slot: %d\n", slot)
+	fmt.Printf("Inclusion constraint (MUST include): %s -> %s (GasPrice: %s)\n",
+		signedInclusionTx.Hash().Hex(), signedInclusionTx.To().Hex(), signedInclusionTx.GasPrice().String())
+	fmt.Printf("Exclusion constraint (MUST exclude): %s -> %s (GasPrice: %s)\n",
+		signedExclusionTx.Hash().Hex(), signedExclusionTx.To().Hex(), signedExclusionTx.GasPrice().String())
+	fmt.Printf("Regular mempool tx: %s -> %s (GasPrice: %s)\n",
+		signedRegularTx.Hash().Hex(), signedRegularTx.To().Hex(), signedRegularTx.GasPrice().String())
+
+	// Call generateWork with constraints
+	result := w.generateWork(&generateParams{
+		parentHash:                w.chain.CurrentBlock().Hash(),
+		timestamp:                 uint64(time.Now().Unix()),
+		coinbase:                  common.Address{0x01},
+		random:                    common.Hash{0x02},
+		withdrawals:               nil,
+		beaconRoot:                nil,
+		noTxs:                     false,
+		forceTime:                 true,
+		onBlock:                   nil,
+		slot:                      slot,
+		inclusionConstraintsCache: inclusionConstraintsCache,
+		exclusionConstraintsCache: exclusionConstraintsCache,
+	})
+
+	// Verify the result
+	require.NoError(t, result.err, "generateWork should not return an error")
+	require.NotNil(t, result.block, "generateWork should return a block")
+
+	fmt.Printf("\n=== BLOCK BUILDING RESULT ===\n")
+	fmt.Printf("Block Number: %d\n", result.block.Number().Uint64())
+	fmt.Printf("Block Hash: %s\n", result.block.Hash().Hex())
+	fmt.Printf("Transaction Count: %d\n", len(result.block.Transactions()))
+	fmt.Printf("Gas Used: %d / %d\n", result.block.GasUsed(), result.block.GasLimit())
+
+	// Analyze block transactions
+	fmt.Printf("\n=== TRANSACTION ANALYSIS ===\n")
+	blockTxHashes := make(map[common.Hash]bool)
+
+	for i, tx := range result.block.Transactions() {
+		blockTxHashes[tx.Hash()] = true
+		fmt.Printf("Tx %d: Hash=%s, To=%s, GasPrice=%s\n",
+			i, tx.Hash().Hex(),
+			func() string {
+				if tx.To() != nil {
+					return tx.To().Hex()
+				}
+				return "CONTRACT_CREATION"
+			}(),
+			tx.GasPrice().String())
+	}
+
+	// Critical constraint verification
+	fmt.Printf("\n=== CONSTRAINT VERIFICATION ===\n")
+
+	// Test 1: Inclusion constraint MUST be in the block
+	inclusionIncluded := blockTxHashes[signedInclusionTx.Hash()]
+	if inclusionIncluded {
+		fmt.Printf("SUCCESS: Inclusion constraint CORRECTLY INCLUDED: %s\n",
+			signedInclusionTx.Hash().Hex())
+	} else {
+		fmt.Printf("FAILURE: Inclusion constraint MISSING: %s\n",
+			signedInclusionTx.Hash().Hex())
+	}
+	require.True(t, inclusionIncluded, "Inclusion constraint must be included in block")
+
+	// Test 2: Exclusion constraint MUST NOT be in the block
+	exclusionIncluded := blockTxHashes[signedExclusionTx.Hash()]
+	if !exclusionIncluded {
+		fmt.Printf("SUCCESS: Exclusion constraint CORRECTLY EXCLUDED: %s\n",
+			signedExclusionTx.Hash().Hex())
+	} else {
+		fmt.Printf("FAILURE: Exclusion constraint INCORRECTLY INCLUDED: %s\n",
+			signedExclusionTx.Hash().Hex())
+	}
+	require.False(t, exclusionIncluded, "Exclusion constraint must NOT be included in block")
+
+	// Test 3: Regular transaction behavior
+	regularIncluded := blockTxHashes[signedRegularTx.Hash()]
+	fmt.Printf("Regular mempool tx included: %v (%s)\n",
+		regularIncluded, signedRegularTx.Hash().Hex())
+
+	// Summary
+	fmt.Printf("\n=== TEST SUMMARY ===\n")
+	fmt.Printf("Inclusion constraint applied: %v\n", inclusionIncluded)
+	fmt.Printf("Exclusion constraint applied: %v\n", !exclusionIncluded)
+	fmt.Printf("Block contains %d transactions\n", len(result.block.Transactions()))
+
+	// Verify constraint logic is working
+	require.True(t, inclusionIncluded && !exclusionIncluded,
+		"Both inclusion and exclusion constraints must be properly applied")
+
+	fmt.Printf("ALL CONSTRAINT TESTS PASSED\n")
+}
