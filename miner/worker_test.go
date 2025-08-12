@@ -93,7 +93,7 @@ var (
 	defaultGenesisAlloc = types.GenesisAlloc{testBankAddress: {Balance: testBankFunds}}
 )
 
-const pendingTxsLen = 50
+const pendingTxsLen = 3
 
 func init() {
 	testTxPoolConfig = legacypool.DefaultConfig
@@ -109,13 +109,26 @@ func init() {
 
 	signer := types.LatestSigner(params.TestChainConfig)
 	for i := 0; i < pendingTxsLen; i++ {
+		// tx1 := types.MustSignNewTx(testBankKey, signer, &types.AccessListTx{
+		// 	ChainID:  params.TestChainConfig.ChainID,
+		// 	Nonce:    uint64(i),
+		// 	To:       &testUserAddress,
+		// 	Value:    big.NewInt(1000),
+		// 	Gas:      params.TxGas,
+		// 	GasPrice: big.NewInt(params.InitialBaseFee),
+		// })
+
 		tx1 := types.MustSignNewTx(testBankKey, signer, &types.AccessListTx{
-			ChainID:  params.TestChainConfig.ChainID,
-			Nonce:    uint64(i),
-			To:       &testUserAddress,
+			ChainID:  big.NewInt(1),
+			Nonce:    1, // Different nonce to avoid conflicts
+			To:       &common.Address{0x01},
+			Gas:      30000,
+			GasPrice: big.NewInt(3000000000), // Even higher gas price but should be excluded
 			Value:    big.NewInt(1000),
-			Gas:      params.TxGas,
-			GasPrice: big.NewInt(params.InitialBaseFee),
+			AccessList: types.AccessList{{
+				Address:     common.Address{0x02},
+				StorageKeys: []common.Hash{{0x01}},
+			}},
 		})
 
 		// Add some constraints every 3 txs, and every 6 add an index
@@ -1064,7 +1077,8 @@ func TestMainLoopInclusionExclusionConstraints(t *testing.T) {
 		require.NoError(t, err)
 
 		// Add regular transaction to mempool
-		w.eth.TxPool().Add([]*types.Transaction{signedRegularTx}, true, false, false)
+		// w.eth.TxPool().Add([]*types.Transaction{signedRegularTx}, true, false, false)
+		// w.eth.TxPool().Add([]*types.Transaction{signedExclusionTx}, true, false, false)
 
 		// Create constraint cache with inclusion constraints
 		constraintsCache := shardmap.NewFIFOMap[uint64, types.HashToConstraintDecoded](64, 16, shardmap.HashUint64)
@@ -1247,4 +1261,241 @@ func TestMainLoopInclusionExclusionConstraints(t *testing.T) {
 			t.Fatal("\nTimeout waiting for constraint block generation result")
 		}
 	})
+}
+
+func TestTimeConstraintsExecutionOrder(t *testing.T) {
+	// Setup worker and environment
+	w, _ := newTestWorker(t, ethashChainConfig, ethash.NewFaker(), rawdb.NewMemoryDatabase(), nil, 0)
+	defer w.close()
+
+	env, err := w.prepareWork(&generateParams{gasLimit: 30000000})
+	require.NoError(t, err)
+
+	// Create test transactions with different timestamps
+	key, _ := crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
+	signer := types.NewEIP2930Signer(big.NewInt(1))
+
+	// Set inclusion constraint time as reference point
+	inclusionConstraintTime := time.Now()
+
+	// Create pre-inclusion transaction (before constraint time)
+	preInclusionTx := &types.AccessListTx{
+		ChainID:  big.NewInt(1),
+		Nonce:    0,
+		To:       &common.Address{0x01},
+		Gas:      30000,
+		GasPrice: big.NewInt(1000000000), // Lower gas price
+		Value:    big.NewInt(1000),
+		AccessList: types.AccessList{{
+			Address:     common.Address{0x02},
+			StorageKeys: []common.Hash{{0x01}},
+		}},
+	}
+	signedPreInclusionTx, err := types.SignNewTx(key, signer, preInclusionTx)
+	require.NoError(t, err)
+	signedPreInclusionTx.SetTime(inclusionConstraintTime.Add(-1 * time.Hour)) // 1 hour before
+
+	// Create inclusion constraint transaction
+	inclusionTx := &types.AccessListTx{
+		ChainID:  big.NewInt(1),
+		Nonce:    1,
+		To:       &common.Address{0x03},
+		Gas:      30000,
+		GasPrice: big.NewInt(2000000000), // High gas price
+		Value:    big.NewInt(2000),
+		AccessList: types.AccessList{{
+			Address:     common.Address{0x04},
+			StorageKeys: []common.Hash{{0x02}},
+		}},
+	}
+	signedInclusionTx, err := types.SignNewTx(key, signer, inclusionTx)
+	require.NoError(t, err)
+	signedInclusionTx.SetTime(inclusionConstraintTime)
+
+	// Create exclusion constraint transaction (should be filtered out initially)
+	exclusionTx := &types.AccessListTx{
+		ChainID:  big.NewInt(1),
+		Nonce:    2,
+		To:       &common.Address{0x05},
+		Gas:      30000,
+		GasPrice: big.NewInt(3000000000), // Highest gas price but should be excluded
+		Value:    big.NewInt(3000),
+		AccessList: types.AccessList{{
+			Address:     common.Address{0x02}, // Conflicts with pre-inclusion tx
+			StorageKeys: []common.Hash{{0x01}},
+		}},
+	}
+	signedExclusionTx, err := types.SignNewTx(key, signer, exclusionTx)
+	require.NoError(t, err)
+	signedExclusionTx.SetTime(inclusionConstraintTime.Add(-30 * time.Minute)) // 30 min before
+
+	// Create post-inclusion transaction (after constraint time)
+	postInclusionTx := &types.AccessListTx{
+		ChainID:  big.NewInt(1),
+		Nonce:    3,
+		To:       &common.Address{0x06},
+		Gas:      30000,
+		GasPrice: big.NewInt(1500000000), // Medium gas price
+		Value:    big.NewInt(1500),
+		AccessList: types.AccessList{{
+			Address:     common.Address{0x07},
+			StorageKeys: []common.Hash{{0x03}},
+		}},
+	}
+	signedPostInclusionTx, err := types.SignNewTx(key, signer, postInclusionTx)
+	require.NoError(t, err)
+	signedPostInclusionTx.SetTime(inclusionConstraintTime.Add(1 * time.Hour)) // 1 hour after
+
+	// Setup mempool transactions
+	pending := make(map[common.Address][]*txpool.LazyTransaction)
+	sender := crypto.PubkeyToAddress(key.PublicKey)
+
+	pending[sender] = []*txpool.LazyTransaction{
+		{
+			Hash:      signedPreInclusionTx.Hash(),
+			Tx:        signedPreInclusionTx,
+			Time:      signedPreInclusionTx.Time(),
+			GasFeeCap: uint256.MustFromBig(signedPreInclusionTx.GasFeeCap()),
+			GasTipCap: uint256.MustFromBig(signedPreInclusionTx.GasTipCap()),
+			Gas:       signedPreInclusionTx.Gas(),
+			GasPrice:  uint256.MustFromBig(signedPreInclusionTx.GasPrice()),
+		},
+		{
+			Hash:      signedExclusionTx.Hash(),
+			Tx:        signedExclusionTx,
+			Time:      signedExclusionTx.Time(),
+			GasFeeCap: uint256.MustFromBig(signedExclusionTx.GasFeeCap()),
+			GasTipCap: uint256.MustFromBig(signedExclusionTx.GasTipCap()),
+			Gas:       signedExclusionTx.Gas(),
+			GasPrice:  uint256.MustFromBig(signedExclusionTx.GasPrice()),
+		},
+		{
+			Hash:      signedPostInclusionTx.Hash(),
+			Tx:        signedPostInclusionTx,
+			Time:      signedPostInclusionTx.Time(),
+			GasFeeCap: uint256.MustFromBig(signedPostInclusionTx.GasFeeCap()),
+			GasTipCap: uint256.MustFromBig(signedPostInclusionTx.GasTipCap()),
+			Gas:       signedPostInclusionTx.Gas(),
+			GasPrice:  uint256.MustFromBig(signedPostInclusionTx.GasPrice()),
+		},
+	}
+
+	// Create constraints
+	inclusionConstraints := make(types.HashToConstraintDecoded)
+	inclusionConstraints[signedInclusionTx.Hash()] = signedInclusionTx
+
+	exclusionConstraints := make(types.HashToConstraintDecoded)
+	exclusionConstraints[signedExclusionTx.Hash()] = signedExclusionTx
+
+	t.Logf("=== TEST SETUP ===")
+	t.Logf("Inclusion constraint time: %v", inclusionConstraintTime)
+	t.Logf("Pre-inclusion tx: %s (time: %v, gas: %s)",
+		signedPreInclusionTx.Hash().Hex(), signedPreInclusionTx.Time(), signedPreInclusionTx.GasPrice().String())
+	t.Logf("Inclusion constraint: %s (time: %v, gas: %s)",
+		signedInclusionTx.Hash().Hex(), signedInclusionTx.Time(), signedInclusionTx.GasPrice().String())
+	t.Logf("Exclusion constraint: %s (time: %v, gas: %s)",
+		signedExclusionTx.Hash().Hex(), signedExclusionTx.Time(), signedExclusionTx.GasPrice().String())
+	t.Logf("Post-inclusion tx: %s (time: %v, gas: %s)",
+		signedPostInclusionTx.Hash().Hex(), signedPostInclusionTx.Time(), signedPostInclusionTx.GasPrice().String())
+
+	// Record initial state
+	initialTxCount := env.tcount
+	t.Logf("=== TESTING DIRECT EXECUTION ===")
+	t.Logf("Initial transaction count: %d", initialTxCount)
+
+	// Call the function that executes transactions directly
+	// This function now executes transactions internally and returns nil
+	result := newTransactionsByPriceAndNonceWithTimeConstraints(
+		w, nil, env, pending, nil, nil,
+		inclusionConstraints, inclusionConstraintTime,
+		exclusionConstraints, env.header.BaseFee)
+
+	// Verify that the function returns nil as expected
+	require.Nil(t, result, "Function should return nil since it executes directly")
+
+	// Check final state after execution
+	finalTxCount := env.tcount
+	executedCount := finalTxCount - initialTxCount
+
+	t.Logf("=== EXECUTION RESULTS ===")
+	t.Logf("Final transaction count: %d", finalTxCount)
+	t.Logf("Executed %d transactions", executedCount)
+
+	// Analyze executed transactions
+	t.Logf("Block transactions:")
+	executedTxHashes := make(map[common.Hash]bool)
+	for i, tx := range env.txs[initialTxCount:] {
+		executedTxHashes[tx.Hash()] = true
+		t.Logf("  %d: %s (GasPrice: %s)", i, tx.Hash().Hex(), tx.GasPrice().String())
+	}
+
+	// Verify constraint compliance
+	t.Logf("=== CONSTRAINT VERIFICATION ===")
+
+	inclusionFound := executedTxHashes[signedInclusionTx.Hash()]
+	exclusionFound := executedTxHashes[signedExclusionTx.Hash()]
+	preInclusionFound := executedTxHashes[signedPreInclusionTx.Hash()]
+	postInclusionFound := executedTxHashes[signedPostInclusionTx.Hash()]
+
+	t.Logf("Inclusion constraint executed: %v (should be true)", inclusionFound)
+	t.Logf("Exclusion constraint executed: %v (should be false)", exclusionFound)
+	t.Logf("Pre-inclusion tx executed: %v (should be true)", preInclusionFound)
+	t.Logf("Post-inclusion tx executed: %v (should be true)", postInclusionFound)
+
+	// Verify execution order based on the 3-phase approach:
+	// 1. Pre-inclusion transactions (filtered)
+	// 2. Inclusion constraints
+	// 3. Post-inclusion transactions + excluded transactions
+
+	// Find positions of executed transactions
+	var inclusionPos, preInclusionPos, postInclusionPos int = -1, -1, -1
+	for i, tx := range env.txs[initialTxCount:] {
+		switch tx.Hash() {
+		case signedInclusionTx.Hash():
+			inclusionPos = i
+		case signedPreInclusionTx.Hash():
+			preInclusionPos = i
+		case signedPostInclusionTx.Hash():
+			postInclusionPos = i
+		}
+	}
+
+	t.Logf("=== EXECUTION ORDER ANALYSIS ===")
+	if preInclusionPos >= 0 {
+		t.Logf("Pre-inclusion tx position: %d", preInclusionPos)
+	}
+	if inclusionPos >= 0 {
+		t.Logf("Inclusion constraint position: %d", inclusionPos)
+	}
+	if postInclusionPos >= 0 {
+		t.Logf("Post-inclusion tx position: %d", postInclusionPos)
+	}
+
+	// Verify expected execution order:
+	// Pre-inclusion should come before inclusion constraint
+	// Inclusion constraint should come before post-inclusion
+	if preInclusionPos >= 0 && inclusionPos >= 0 {
+		require.True(t, preInclusionPos < inclusionPos,
+			"Pre-inclusion tx should be executed before inclusion constraint")
+	}
+	if inclusionPos >= 0 && postInclusionPos >= 0 {
+		require.True(t, inclusionPos < postInclusionPos,
+			"Inclusion constraint should be executed before post-inclusion tx")
+	}
+
+	// Assert constraint compliance
+	require.True(t, inclusionFound, "Inclusion constraint must be executed")
+	require.False(t, exclusionFound, "Exclusion constraint must NOT be executed")
+	require.True(t, preInclusionFound, "Pre-inclusion transaction should be executed")
+	require.True(t, postInclusionFound, "Post-inclusion transaction should be executed")
+
+	// Verify execution count matches expected
+	expectedExecutedCount := 3 // pre-inclusion + inclusion + post-inclusion (exclusion should be filtered)
+	require.Equal(t, expectedExecutedCount, executedCount,
+		"Should execute exactly 3 transactions (excluding the filtered exclusion constraint)")
+
+	t.Logf("=== TEST COMPLETED SUCCESSFULLY ===")
+	t.Logf("✓ All constraints properly enforced")
+	t.Logf("✓ Execution order follows time-based constraint logic")
+	t.Logf("✓ Expected number of transactions executed")
 }

@@ -43,7 +43,6 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/holiman/uint256"
-
 	// "container/heap"
 )
 
@@ -675,7 +674,7 @@ func (w *worker) mainLoop() {
 	}
 }
 
-// executeTransactionsInOrder executes transactions in heap order without complex constraint logic
+// executeTransactionsInOrder executes transactions order without complex constraint logic
 func (w *worker) executeTransactionsInOrder(env *environment, plainTxs *transactionsByPriceAndNonce, interrupt *atomic.Int32) error {
 	gasLimit := env.header.GasLimit
 	if env.gasPool == nil {
@@ -1479,16 +1478,16 @@ func (w *worker) fillTransactionsWithTimeConstraints(interrupt *atomic.Int32, en
 
 	// Add constraint hashes to mempool hashes
 	for hash := range inclusionConstraints {
-		
+
 		fmt.Printf("\n[🐛 DEBUG] Adding constraint hash to mempool: %s", hash.Hex())
 		mempoolTxHashes[hash] = struct{}{}
 	}
 
-	newTransactionsByPriceAndNonceWithTimeConstraints(  
-		w, interrupt, env, pending, nil, nil,  
-		inclusionConstraints, inclusionConstraintTime,  
-		exclusionConstraints, env.header.BaseFee)  
- 
+	newTransactionsByPriceAndNonceWithTimeConstraints(
+		w, interrupt, env, pending, nil, nil,
+		inclusionConstraints, inclusionConstraintTime,
+		exclusionConstraints, env.header.BaseFee)
+
 	// Return the required values (empty bundles since you're not processing bundles in this flow)
 	return []types.SimulatedBundle{}, []types.SimulatedBundle{}, []types.UsedSBundle{}, mempoolTxHashes, nil
 }
@@ -1504,26 +1503,122 @@ func newTransactionsByPriceAndNonceWithTimeConstraints(
 	inclusionConstraintTime time.Time,
 	exclusionConstraints types.HashToConstraintDecoded,
 	baseFee *big.Int) *transactionsByPriceAndNonce {
-	// 1단계: Pre-inclusion 트랜잭션들 먼저 실행
-	preInclusionTxs := filterTransactionsByTime(txs, inclusionConstraintTime, true)
-	preInclusionFiltered, excludedTxs := applyExclusionFilter(preInclusionTxs, exclusionConstraints)
-	preOrders := newTransactionsByPriceAndNonce(env.signer, preInclusionFiltered, nil, nil, env.header.BaseFee)
 
-	worker.executeTransactionsInOrder(env, preOrders, interrupt)
+	fmt.Printf("\n=== ✏️ STEP 1: PRE-INCLUSION FILTERING ===\n")
+	fmt.Printf("Inclusion constraint time: %v\n", inclusionConstraintTime)
+	fmt.Printf("Total mempool transactions: %d addresses\n", len(txs))
 
-	// 2단계: Inclusion constraints 실행
-	for _, constraintTx := range inclusionConstraints {
-		env.state.SetTxContext(constraintTx.Hash(), env.tcount)
-		worker.commitTransaction(env, constraintTx)
-		env.tcount++
+	// 1단계: Pre-inclusion 트랜잭션들 필터링
+	preInclusionTxs, preSkippedTxs := filterTransactionsByTime(txs, inclusionConstraintTime, true)
+	fmt.Printf("Pre-inclusion txs (before constraint time): %d addresses\n", len(preInclusionTxs))
+
+	for addr, txList := range preInclusionTxs {
+		fmt.Printf("  Address %s: %d transactions\n", addr.Hex(), len(txList))
+		for i, tx := range txList {
+			fmt.Printf("    Tx %d: Hash=%s, GasPrice=%s, Time=%v\n",
+				i, tx.Hash.Hex(), tx.GasPrice.String(), tx.Time)
+		}
 	}
 
-	// 3단계: Post-inclusion 트랜잭션들 + 필터링된 트랜잭션들 실행
-	postInclusionTxs := filterTransactionsByTime(txs, inclusionConstraintTime, false)
-	postCombined := mergeTxMaps(excludedTxs, postInclusionTxs)
-	postOrders := newTransactionsByPriceAndNonce(env.signer, postCombined, nil, nil, env.header.BaseFee)
+	// Exclusion 필터 적용
+	preInclusionFiltered, excludedTxs := applyExclusionFilter(preInclusionTxs, exclusionConstraints)
+	fmt.Printf("After exclusion filter: %d addresses (excluded: %d addresses)\n",
+		len(preInclusionFiltered), len(excludedTxs))
 
+	fmt.Printf("Excluded transactions:\n")
+	for addr, txList := range excludedTxs {
+		fmt.Printf("  Address %s: %d excluded transactions\n", addr.Hex(), len(txList))
+		for i, tx := range txList {
+			fmt.Printf("    Excluded Tx %d: Hash=%s, GasPrice=%s\n",
+				i, tx.Hash.Hex(), tx.GasPrice.String())
+		}
+	}
+
+	// Pre-inclusion 트랜잭션들 실행
+	preOrders := newTransactionsByPriceAndNonce(env.signer, preInclusionFiltered, nil, nil, env.header.BaseFee)
+	fmt.Printf("Pre-inclusion orders created with %d items\n", len(preOrders.heads))
+
+	initialTxCount := env.tcount
+	worker.executeTransactionsInOrder(env, preOrders, interrupt)
+	preExecutedCount := env.tcount - initialTxCount
+	fmt.Printf("Pre-inclusion phase executed %d transactions\n", preExecutedCount)
+
+	// 2단계: Inclusion constraints 실행
+	fmt.Printf("\n=== ✏️ STEP 2: INCLUSION CONSTRAINTS EXECUTION ===\n")
+	fmt.Printf("Number of inclusion constraints: %d\n", len(inclusionConstraints))
+
+	inclusionStartCount := env.tcount
+	for hash, constraintTx := range inclusionConstraints {
+		if constraintTx == nil {
+			fmt.Printf("WARNING: Nil constraint transaction for hash %s\n", hash.Hex())
+			continue
+		}
+
+		fmt.Printf("Executing inclusion constraint: Hash=%s, Nonce=%d, GasPrice=%s, To=%s\n",
+			hash.Hex(), constraintTx.Nonce(), constraintTx.GasPrice().String(),
+			func() string {
+				if constraintTx.To() != nil {
+					return constraintTx.To().Hex()
+				}
+				return "CONTRACT_CREATION"
+			}())
+
+		env.state.SetTxContext(constraintTx.Hash(), env.tcount)
+		_, err := worker.commitTransaction(env, constraintTx)
+		if err != nil {
+			fmt.Printf("ERROR: Failed to execute inclusion constraint %s: %v\n", hash.Hex(), err)
+			continue
+		}
+
+		env.tcount++
+		// fmt.Printf("SUCCESS: Inclusion constraint executed at index %d, GasUsed=%d\n",
+		// 	env.tcount-1, receipt.GasUsed)
+	}
+	inclusionExecutedCount := env.tcount - inclusionStartCount
+	fmt.Printf("Inclusion constraints phase executed %d transactions\n", inclusionExecutedCount)
+
+	// 3단계: Post-inclusion 트랜잭션들 + 필터링된 트랜잭션들 실행
+	fmt.Printf("\n=== ✏️ STEP 3: POST-INCLUSION EXECUTION ===\n")
+
+	// postInclusionTxs := filterTransactionsByTime(txs, inclusionConstraintTime, false)
+	// fmt.Printf("Post-inclusion txs (after constraint time): %d addresses\n", len(postInclusionTxs))
+
+	// for addr, txList := range postInclusionTxs {
+	// 	fmt.Printf("  Address %s: %d post-inclusion transactions\n", addr.Hex(), len(txList))
+	// 	for i, tx := range txList {
+	// 		fmt.Printf("    Post Tx %d: Hash=%s, GasPrice=%s, Time=%v\n",
+	// 			i, tx.Hash.Hex(), tx.GasPrice.String(), tx.Time)
+	// 	}
+	// }
+
+	postCombined := mergeTxMaps(excludedTxs, preSkippedTxs)
+	fmt.Printf("Combined post-inclusion + excluded: %d addresses\n", len(postCombined))
+
+	fmt.Printf("Final combined transactions for post-inclusion phase:\n")
+	for addr, txList := range postCombined {
+		fmt.Printf("  Address %s: %d combined transactions\n", addr.Hex(), len(txList))
+		for i, tx := range txList {
+			fmt.Printf("    Combined Tx %d: Hash=%s, GasPrice=%s, Time=%v\n",
+				i, tx.Hash.Hex(), tx.GasPrice.String(), tx.Time)
+		}
+	}
+
+	postOrders := newTransactionsByPriceAndNonce(env.signer, postCombined, nil, nil, env.header.BaseFee)
+	fmt.Printf("Post-inclusion orders created with %d items\n", len(postOrders.heads))
+
+	postStartCount := env.tcount
 	worker.executeTransactionsInOrder(env, postOrders, interrupt)
+	postExecutedCount := env.tcount - postStartCount
+	fmt.Printf("Post-inclusion phase executed %d transactions\n", postExecutedCount)
+
+	// 최종 요약
+	fmt.Printf("\n=== EXECUTION SUMMARY ===\n")
+	fmt.Printf("Total transactions executed: %d\n", env.tcount-initialTxCount)
+	fmt.Printf("  - Pre-inclusion: %d\n", preExecutedCount)
+	fmt.Printf("  - Inclusion constraints: %d\n", inclusionExecutedCount)
+	fmt.Printf("  - Post-inclusion: %d\n", postExecutedCount)
+	fmt.Printf("Final block transaction count: %d\n", len(env.txs))
+
 	return nil
 }
 
@@ -1621,29 +1716,64 @@ func newTransactionsByPriceAndNonceWithTimeConstraints(
 
 // Helper function
 func filterTransactionsByTime(txs map[common.Address][]*txpool.LazyTransaction,
-	cutoffTime time.Time, before bool) map[common.Address][]*txpool.LazyTransaction {
+	cutoffTime time.Time, before bool) (map[common.Address][]*txpool.LazyTransaction, map[common.Address][]*txpool.LazyTransaction) {
 
 	filtered := make(map[common.Address][]*txpool.LazyTransaction)
+	skipped := make(map[common.Address][]*txpool.LazyTransaction)
+
+	totalTxsProcessed := 0
+	totalTxsFiltered := 0
+	totalTxsSkipped := 0
+
+	fmt.Printf("[🐛 DEBUG] filterTransactionsByTime: cutoff=%s, before=%t\n",
+		cutoffTime.Format("15:04:05.000"), before)
 
 	for addr, txList := range txs {
 		var filteredTxs []*txpool.LazyTransaction
+		var skippedTxs []*txpool.LazyTransaction
+
 		for _, tx := range txList {
+			totalTxsProcessed++
+
 			if before {
 				if tx.Time.Before(cutoffTime) {
 					filteredTxs = append(filteredTxs, tx)
+					totalTxsFiltered++
+					fmt.Printf("[🐛 DEBUG] PRE-INCLUSION: hash=%s, time=%s\n",
+						tx.Hash.Hex(), tx.Time.Format("15:04:05.000"))
+				} else {
+					skippedTxs = append(skippedTxs, tx)
+					totalTxsSkipped++
+					fmt.Printf("[🐛 DEBUG] POST-CUTOFF: hash=%s, time=%s\n",
+						tx.Hash.Hex(), tx.Time.Format("15:04:05.000"))
 				}
 			} else {
 				if tx.Time.After(cutoffTime) || tx.Time.Equal(cutoffTime) {
 					filteredTxs = append(filteredTxs, tx)
+					totalTxsFiltered++
+					fmt.Printf("[🐛 DEBUG] POST-INCLUSION: hash=%s, time=%s\n",
+						tx.Hash.Hex(), tx.Time.Format("15:04:05.000"))
+				} else {
+					skippedTxs = append(skippedTxs, tx)
+					totalTxsSkipped++
+					fmt.Printf("[🐛 DEBUG] PRE-CUTOFF: hash=%s, time=%s\n",
+						tx.Hash.Hex(), tx.Time.Format("15:04:05.000"))
 				}
 			}
 		}
+
 		if len(filteredTxs) > 0 {
 			filtered[addr] = filteredTxs
 		}
+		if len(skippedTxs) > 0 {
+			skipped[addr] = skippedTxs
+		}
 	}
 
-	return filtered
+	fmt.Printf("[🐛 DEBUG] Time filter result: processed=%d, filtered=%d, skipped=%d\n",
+		totalTxsProcessed, totalTxsFiltered, totalTxsSkipped)
+
+	return filtered, skipped
 }
 
 // Helper function: Exclusion constraint
@@ -1651,27 +1781,39 @@ func applyExclusionFilter(txs map[common.Address][]*txpool.LazyTransaction,
 	exclusionConstraints types.HashToConstraintDecoded) (map[common.Address][]*txpool.LazyTransaction, map[common.Address][]*txpool.LazyTransaction) {
 
 	if len(exclusionConstraints) == 0 {
+		fmt.Printf("[🐛 DEBUG] No exclusion constraints, returning all transactions\n")
 		return txs, make(map[common.Address][]*txpool.LazyTransaction)
 	}
 
 	// Create exclusion address set from access lists
 	excludedAddresses := make(map[common.Address]struct{})
-	for _, constraintTx := range exclusionConstraints {
+	fmt.Printf("[🐛 DEBUG] Processing %d exclusion constraints:\n", len(exclusionConstraints))
+
+	for hash, constraintTx := range exclusionConstraints {
+		fmt.Printf("[🐛 DEBUG] Exclusion constraint hash: %s\n", hash.Hex())
 		if accessList := constraintTx.AccessList(); accessList != nil {
 			for _, tuple := range accessList {
 				excludedAddresses[tuple.Address] = struct{}{}
+				fmt.Printf("[🐛 DEBUG] Adding excluded address: %s\n", tuple.Address.Hex())
 			}
 		}
 	}
 
+	fmt.Printf("[🐛 DEBUG] Total excluded addresses in the pool: %d\n", len(excludedAddresses))
+
 	filtered := make(map[common.Address][]*txpool.LazyTransaction)
 	excluded := make(map[common.Address][]*txpool.LazyTransaction)
+
+	totalTxsProcessed := 0
+	totalTxsFiltered := 0
+	totalTxsExcluded := 0
 
 	for addr, txList := range txs {
 		var filteredTxs []*txpool.LazyTransaction
 		var excludedTxs []*txpool.LazyTransaction
 
 		for _, tx := range txList {
+			totalTxsProcessed++
 			hasConflict := false
 
 			// Check if tx's access list conflicts with exclusion constraints
@@ -1679,6 +1821,8 @@ func applyExclusionFilter(txs map[common.Address][]*txpool.LazyTransaction,
 				for _, tuple := range accessList {
 					if _, excluded := excludedAddresses[tuple.Address]; excluded {
 						hasConflict = true
+						fmt.Printf("[🐛 DEBUG] TX EXCLUDED: hash=%s, conflicting_address=%s\n",
+							tx.Hash.Hex(), tuple.Address.Hex())
 						break
 					}
 				}
@@ -1686,8 +1830,10 @@ func applyExclusionFilter(txs map[common.Address][]*txpool.LazyTransaction,
 
 			if hasConflict {
 				excludedTxs = append(excludedTxs, tx)
+				totalTxsExcluded++
 			} else {
 				filteredTxs = append(filteredTxs, tx)
+				totalTxsFiltered++
 			}
 		}
 
@@ -1696,8 +1842,13 @@ func applyExclusionFilter(txs map[common.Address][]*txpool.LazyTransaction,
 		}
 		if len(excludedTxs) > 0 {
 			excluded[addr] = excludedTxs
+			fmt.Printf("[🐛 DEBUG] Address %s: %d transactions excluded\n",
+				addr.Hex(), len(excludedTxs))
 		}
 	}
+
+	fmt.Printf("[🐛 DEBUG] Exclusion filter summary: processed=%d, filtered=%d, excluded=%d\n",
+		totalTxsProcessed, totalTxsFiltered, totalTxsExcluded)
 
 	return filtered, excluded
 }
@@ -2039,7 +2190,7 @@ func (w *worker) generateWork(params *generateParams) *newPayloadResult {
 			totalSbundles++
 		}
 
-		fmt.Printf("🔥 Block finalized and assembled: height=%s blockProfit=%v txs=%d bundles=%d okSbundles=%d totalSbundles=%d gasUsed=%d time=%v\n",
+		fmt.Printf("\n🔥 Block finalized and assembled: height=%s blockProfit=%v txs=%d bundles=%d okSbundles=%d totalSbundles=%d gasUsed=%d time=%v\n",
 			block.Number().String(), ethIntToFloat(uint256.MustFromBig(profit)),
 			len(env.txs), len(blockBundles), okSbundles, totalSbundles,
 			block.GasUsed(), time.Since(start))
@@ -2544,7 +2695,7 @@ func (w *worker) simulateBundles(env *environment, bundles []types.MevBundle, sb
 		}
 	}
 
-	log.Debug("Simulated bundles", "block", env.header.Number, "allBundles", len(bundles), "okBundles", len(simulatedBundles),
+	log.Debug("\nSimulated bundles", "block", env.header.Number, "allBundles", len(bundles), "okBundles", len(simulatedBundles),
 		"allSbundles", len(sbundles), "okSbundles", len(simulatedSbundle), "time", time.Since(start))
 	if metrics.EnabledBuilder {
 		blockBundleSimulationTimer.Update(time.Since(start))
