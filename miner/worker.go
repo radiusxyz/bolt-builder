@@ -270,7 +270,7 @@ func newWorker(config *Config, chainConfig *params.ChainConfig, engine consensus
 		builderCoinbase = crypto.PubkeyToAddress(config.BuilderTxSigningKey.PublicKey)
 	}
 
-	log.Info("new worker", "builderCoinbase", builderCoinbase.String())
+	log.Info("\nnew worker", "builderCoinbase", builderCoinbase.String())
 	exitCh := make(chan struct{})
 	taskCh := make(chan *task)
 	// mev-geth deprecated
@@ -564,7 +564,7 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 				log.Warn("Sanitizing miner recommit interval", "provided", interval, "updated", minRecommitInterval)
 				interval = minRecommitInterval
 			}
-			log.Info("Miner recommit interval update", "from", minRecommit, "to", interval)
+			log.Info("\nMiner recommit interval update", "from", minRecommit, "to", interval)
 			minRecommit, recommit = interval, interval
 
 			if w.resubmitHook != nil {
@@ -724,7 +724,7 @@ func (w *worker) taskLoop() {
 			// Interrupt previous sealing operation
 			interrupt()
 			stopCh, prev = make(chan struct{}), sealHash
-			log.Info("Proposed miner block", "blockNumber", task.block.Number(), "profit", ethIntToFloat(prevProfit), "isFlashbots", task.isFlashbots, "sealhash", sealHash, "parentHash", prevParentHash, "worker", task.worker)
+			log.Info("\nProposed miner block", "blockNumber", task.block.Number(), "profit", ethIntToFloat(prevProfit), "isFlashbots", task.isFlashbots, "sealhash", sealHash, "parentHash", prevParentHash, "worker", task.worker)
 			if w.skipSealHook != nil && w.skipSealHook(task) {
 				continue
 			}
@@ -803,7 +803,7 @@ func (w *worker) resultLoop() {
 				log.Error("Failed writing block to chain", "err", err)
 				continue
 			}
-			log.Info("Successfully sealed new block", "number", block.Number(), "sealhash", sealhash, "hash", hash,
+			log.Info("\nSuccessfully sealed new block", "number", block.Number(), "sealhash", sealhash, "hash", hash,
 				"elapsed", common.PrettyDuration(time.Since(task.createdAt)))
 
 			// Broadcast the block and announce chain insertion event
@@ -1468,21 +1468,61 @@ func newTransactionsByPriceAndNonceWithTimeConstraints(
 		baseFeeUint = uint256.MustFromBig(baseFee)
 	}
 
+	log.Info("\n=== CONSTRAINT PROCESSING DEBUG ===")
+	log.Info(fmt.Sprintf("\nInput constraints: inclusion=%d, exclusion=%d",
+		len(inclusionConstraints), len(exclusionConstraints)))
+	log.Info(fmt.Sprintf("\nInclusion constraint time: %v", inclusionConstraintTime))
+
+	// Log inclusion constraints
+	for hash, tx := range inclusionConstraints {
+		log.Info(fmt.Sprintf("\n[INCLUSION] Hash=%s, Nonce=%d, GasPrice=%s, To=%s",
+			hash.Hex(), tx.Nonce(), tx.GasPrice().String(),
+			func() string {
+				if tx.To() != nil {
+					return tx.To().Hex()
+				}
+				return "CONTRACT_CREATION"
+			}()))
+	}
+
+	// Log exclusion constraints
+	for hash, tx := range exclusionConstraints {
+		log.Info(fmt.Sprintf("\n[EXCLUSION] Hash=%s, Nonce=%d, GasPrice=%s, To=%s",
+			hash.Hex(), tx.Nonce(), tx.GasPrice().String(),
+			func() string {
+				if tx.To() != nil {
+					return tx.To().Hex()
+				}
+				return "CONTRACT_CREATION"
+			}()))
+	}
+
 	preInclusionTxs := filterTransactionsByTime(txs, inclusionConstraintTime, true)
+	log.Info(fmt.Sprintf("\nPre-inclusion txs (before time filter): %d addresses", len(preInclusionTxs)))
+
 	preInclusionFiltered := applyExclusionFilter(preInclusionTxs, exclusionConstraints)
+	log.Info(fmt.Sprintf("\nPre-inclusion filtered (after exclusion filter): %d addresses", len(preInclusionFiltered)))
 
 	postInclusionTxs := filterTransactionsByTime(txs, inclusionConstraintTime, false)
+	log.Info(fmt.Sprintf("\nPost-inclusion txs (after time filter): %d addresses", len(postInclusionTxs)))
 
 	allFilteredTxs := mergeTxMaps(preInclusionFiltered, postInclusionTxs)
+	log.Info(fmt.Sprintf("\nAll filtered txs (merged): %d addresses", len(allFilteredTxs)))
 
 	// Initialize heap with estimated capacity
 	heads := make(txByPriceAndTime, 0, len(allFilteredTxs)+len(bundles)+len(sbundles)+len(inclusionConstraints))
 
-	for _, constraintTx := range inclusionConstraints {
+	log.Info("\n=== ADDING INCLUSION CONSTRAINTS TO HEAP ===")
+	inclusionCount := 0
+	for hash, constraintTx := range inclusionConstraints {
 		from, err := types.Sender(signer, constraintTx)
 		if err != nil {
+			log.Warn(fmt.Sprintf("[INCLUSION] Failed to get sender for %s: %v", hash.Hex(), err))
 			continue
 		}
+
+		log.Info(fmt.Sprintf("\n[INCLUSION] Adding to heap: Hash=%s, From=%s, GasPrice=%s",
+			hash.Hex(), from.Hex(), constraintTx.GasPrice().String()))
 
 		// Create LazyTransaction wrapper for constraint
 		lazyConstraint := &txpool.LazyTransaction{
@@ -1498,10 +1538,13 @@ func newTransactionsByPriceAndNonceWithTimeConstraints(
 
 		wrapped, err := newTxWithMinerFee(lazyConstraint, from, baseFeeUint)
 		if err != nil {
+			log.Warn(fmt.Sprintf("[INCLUSION] Failed to wrap tx %s: %v", hash.Hex(), err))
 			continue
 		}
 		heads = append(heads, wrapped)
+		inclusionCount++
 	}
+	log.Info(fmt.Sprintf("\nSuccessfully added %d inclusion constraints to heap", inclusionCount))
 
 	for i := range sbundles {
 		wrapped, err := newSBundleWithMinerFee(sbundles[i])
@@ -1519,21 +1562,47 @@ func newTransactionsByPriceAndNonceWithTimeConstraints(
 		heads = append(heads, wrapped)
 	}
 
+	log.Info("\n=== ADDING FILTERED MEMPOOL TXS TO HEAP ===")
+	mempoolCount := 0
+	excludedCount := 0
 	// Process filtered transactions
 	for from, accTxs := range allFilteredTxs {
 		if len(accTxs) == 0 {
 			continue
 		}
+
+		tx := accTxs[0]
+		// Check if this tx is in exclusion constraints
+		if _, isExcluded := exclusionConstraints[tx.Hash]; isExcluded {
+			log.Info(fmt.Sprintf("\n[EXCLUDED] Mempool tx %s was filtered out by exclusion constraint", tx.Hash.Hex()))
+			excludedCount++
+			continue
+		}
+
+		log.Info(fmt.Sprintf("\n[MEMPOOL] Adding to heap: Hash=%s, From=%s, GasPrice=%s",
+			tx.Hash.Hex(), from.Hex(), tx.GasPrice.String()))
+
 		wrapped, err := newTxWithMinerFee(accTxs[0], from, baseFeeUint)
 		if err != nil {
+			log.Warn(fmt.Sprintf("[MEMPOOL] Failed to wrap tx %s: %v", tx.Hash.Hex(), err))
 			delete(allFilteredTxs, from)
 			continue
 		}
 		heads = append(heads, wrapped)
 		allFilteredTxs[from] = accTxs[1:]
+		mempoolCount++
 	}
 
+	log.Info(fmt.Sprintf("\nAdded %d mempool txs to heap, excluded %d txs", mempoolCount, excludedCount))
+
 	heap.Init(&heads)
+
+	log.Info("\n=== FINAL HEAP SUMMARY ===")
+	log.Info(fmt.Sprintf("\nTotal items in heap: %d", len(heads)))
+	log.Info(fmt.Sprintf("\n- Inclusion constraints: %d", inclusionCount))
+	log.Info(fmt.Sprintf("\n- Mempool transactions: %d", mempoolCount))
+	log.Info(fmt.Sprintf("\n- Bundles: %d", len(bundles)))
+	log.Info(fmt.Sprintf("\n- SBundles: %d", len(sbundles)))
 
 	// Assemble and return the transaction set
 	return &transactionsByPriceAndNonce{
@@ -1971,7 +2040,7 @@ func (w *worker) generateWork(params *generateParams) *newPayloadResult {
 		return &newPayloadResult{err: err}
 	}
 
-	log.Info("Proposer tx prepared",
+	log.Info("\nProposer tx prepared",
 		"paymentTxReserve", paymentTxReserve != nil,
 		"workTxCount", len(work.txs),
 		"coinbase", w.coinbase,
@@ -2010,7 +2079,7 @@ func (w *worker) generateWork(params *generateParams) *newPayloadResult {
 	}
 
 	// 추가: fillTransactionsSelectAlgo 결과 로그
-	log.Info("Transaction selection result",
+	log.Info("\nTransaction selection result",
 		"blockBundles", len(blockBundles),
 		"allBundles", len(allBundles),
 		"usedSbundles", len(usedSbundles),
@@ -2192,13 +2261,13 @@ func (w *worker) commit(env *environment, interval func(), update bool, start ti
 			case w.taskCh <- &task{receipts: env.receipts, state: env.state, block: block, createdAt: time.Now(), profit: env.profit, isFlashbots: w.flashbots.isFlashbots, worker: w.flashbots.maxMergedBundles}:
 				fees := totalFees(block, env)
 				feesInEther := new(big.Float).Quo(new(big.Float).SetInt(fees.ToBig()), big.NewFloat(params.Ether))
-				log.Info("Commit new sealing work", "number", block.Number(), "sealhash", w.engine.SealHash(block.Header()),
+				log.Info("\nCommit new sealing work", "number", block.Number(), "sealhash", w.engine.SealHash(block.Header()),
 					"txs", env.tcount, "gas", block.GasUsed(), "fees", feesInEther,
 					"elapsed", common.PrettyDuration(time.Since(start)), "isFlashbots", w.flashbots.isFlashbots,
 					"worker", w.flashbots.maxMergedBundles)
 
 			case <-w.exitCh:
-				log.Info("Worker has exited")
+				log.Info("\nWorker has exited")
 			}
 		}
 	}
@@ -2278,7 +2347,7 @@ func (w *worker) mergeBundles(env *environment, bundles []simulatedBundle, pendi
 			continue
 		}
 
-		log.Info("Included bundle", "ethToCoinbase", ethIntToFloat(simmed.TotalEth), "gasUsed", simmed.TotalGasUsed, "bundleScore", simmed.MevGasPrice, "bundleLength", len(simmed.OriginalBundle.Txs), "worker", w.flashbots.maxMergedBundles)
+		log.Info("\nIncluded bundle", "ethToCoinbase", ethIntToFloat(simmed.TotalEth), "gasUsed", simmed.TotalGasUsed, "bundleScore", simmed.MevGasPrice, "bundleLength", len(simmed.OriginalBundle.Txs), "worker", w.flashbots.maxMergedBundles)
 		mergedBundles = append(mergedBundles, simmed)
 		finalBundle = append(finalBundle, bundle.OriginalBundle.Txs...)
 		mergedBundle.TotalEth.Add(mergedBundle.TotalEth, simmed.TotalEth)
