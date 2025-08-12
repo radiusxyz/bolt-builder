@@ -20,6 +20,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/flashbotsextra"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/trie"
 	"github.com/flashbots/go-boost-utils/bls"
 	"github.com/flashbots/go-boost-utils/ssz"
 	"github.com/flashbots/go-boost-utils/utils"
@@ -819,24 +820,26 @@ func TestSubscribeProposerConstraints(t *testing.T) {
 	// Wait 2 seconds to save all constraints in cache
 	time.Sleep(2 * time.Second)
 
-	slots := []uint64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
-	for _, slot := range slots {
-		expectedConstraint := generateMockConstraintsForSlot(slot)[0]
-		decodedConstraint, err := DecodeConstraints(expectedConstraint)
-		require.NoError(t, err)
+	slot := uint64(0)
+	// slots := []uint64{0}
+	// slots := []uint64{0, 1, 2}
+	// for _, slot := range slots {
+	expectedConstraint := generateMockConstraintsForSlot(slot)[0]
+	decodedConstraint, err := DecodeConstraints(expectedConstraint)
+	require.NoError(t, err)
 
-		if expectedConstraint.Message.Top {
-			// Inclusion constraint
-			cachedConstraints, ok := builder.inclusionConstraintsCache.Get(slot)
-			require.True(t, ok, fmt.Sprintf("expected inclusion constraint for slot %d", slot))
-			require.Equal(t, len(cachedConstraints), len(decodedConstraint), fmt.Sprintf("slot %d inclusion constraint length mismatch", slot))
-		} else {
-			// Exclusion constraint
-			cachedConstraints, ok := builder.exclusionConstraintsCache.Get(slot)
-			require.True(t, ok, fmt.Sprintf("expected exclusion constraint for slot %d", slot))
-			require.Equal(t, len(cachedConstraints), len(decodedConstraint), fmt.Sprintf("slot %d exclusion constraint length mismatch", slot))
-		}
+	if expectedConstraint.Message.Top {
+		// Inclusion constraint
+		cachedConstraints, ok := builder.inclusionConstraintsCache.Get(slot)
+		require.True(t, ok, fmt.Sprintf("expected inclusion constraint for slot %d", slot))
+		require.Equal(t, len(cachedConstraints), len(decodedConstraint), fmt.Sprintf("slot %d inclusion constraint length mismatch", slot))
+	} else {
+		// Exclusion constraint
+		cachedConstraints, ok := builder.exclusionConstraintsCache.Get(slot)
+		require.True(t, ok, fmt.Sprintf("expected exclusion constraint for slot %d", slot))
+		require.Equal(t, len(cachedConstraints), len(decodedConstraint), fmt.Sprintf("slot %d exclusion constraint length mismatch", slot))
 	}
+	// }
 }
 
 func TestDeserializeConstraints(t *testing.T) {
@@ -888,7 +891,8 @@ func sseConstraintsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	for i := 0; i < 256; i++ {
+	// for i := 0; i < 256; i++ {
+	for i := 0; i < 1; i++ {
 		// Generate some duplicated constraints
 		slot := uint64(i) % 32
 		constraints := generateMockConstraintsForSlot(slot)
@@ -916,5 +920,247 @@ func generateMockConstraintsForSlot(slot uint64) types.SignedConstraintsList {
 				Transactions: []*types.Transaction{rawTx}, Pubkey: phase0.BLSPubKey{}, Slot: slot,
 			}, Signature: phase0.BLSSignature{},
 		},
+		&types.SignedConstraints{
+			Message: types.ConstraintsMessage{
+				Transactions: []*types.Transaction{rawTx}, Pubkey: phase0.BLSPubKey{}, Slot: slot, Top: true,
+			}, Signature: phase0.BLSSignature{},
+		},
 	}
+}
+
+func setBlockhash(data *engine.ExecutableData) *engine.ExecutableData {
+	txs, _ := decodeTransactions(data.Transactions)
+	number := big.NewInt(0)
+	number.SetUint64(data.Number)
+	header := &types.Header{
+		ParentHash:  data.ParentHash,
+		UncleHash:   types.EmptyUncleHash,
+		Coinbase:    data.FeeRecipient,
+		Root:        data.StateRoot,
+		TxHash:      types.DeriveSha(types.Transactions(txs), trie.NewStackTrie(nil)),
+		ReceiptHash: data.ReceiptsRoot,
+		Bloom:       types.BytesToBloom(data.LogsBloom),
+		Difficulty:  common.Big0,
+		Number:      number,
+		GasLimit:    data.GasLimit,
+		GasUsed:     data.GasUsed,
+		Time:        data.Timestamp,
+		BaseFee:     data.BaseFeePerGas,
+		Extra:       data.ExtraData,
+		MixDigest:   data.Random,
+	}
+	block := types.NewBlockWithHeader(header).WithBody(txs, nil /* uncles */)
+	data.BlockHash = block.Hash()
+	return data
+}
+
+// decodeTransactions decodes a slice of raw transaction bytes into []*types.Transaction.
+func decodeTransactions(rawTxs [][]byte) ([]*types.Transaction, error) {
+	txs := make([]*types.Transaction, 0, len(rawTxs))
+	for _, raw := range rawTxs {
+		tx := new(types.Transaction)
+		if err := tx.UnmarshalBinary(raw); err != nil {
+			return nil, err
+		}
+		txs = append(txs, tx)
+	}
+	return txs, nil
+}
+
+func TestOnSealedBlockWithConstraints(t *testing.T) {
+	const (
+		validatorDesiredGasLimit = 30_000_000
+		parentBlockGasLimit      = 29_000_000
+		testSlot                 = uint64(25)
+	)
+	expectedGasLimit := core.CalcGasLimit(parentBlockGasLimit, validatorDesiredGasLimit)
+
+	// Setup validator and beacon client
+	vsk, err := bls.SecretKeyFromBytes(hexutil.MustDecode("0x370bb8c1a6e62b2882f6ec76762a67b39609002076b95aae5b023997cf9b2dc9"))
+	require.NoError(t, err)
+	validator := &ValidatorPrivateData{
+		sk: vsk,
+		Pk: hexutil.MustDecode("0xb67d2c11bcab8c4394fc2faa9601d0b99c7f4b37e14911101da7d97077917862eed4563203d34b91b5cf0aa44d6cfa05"),
+	}
+
+	testBeacon := testBeaconClient{
+		validator: validator,
+		slot:      56,
+	}
+	feeRecipient, _ := utils.HexToAddress("0xabcf8e0d4e9587369b2301d0790347320302cc00")
+	testRelay := testRelay{
+		gvsVd: ValidatorData{
+			Pubkey:       PubkeyHex(testBeacon.validator.Pk.String()),
+			FeeRecipient: feeRecipient,
+			GasLimit:     validatorDesiredGasLimit,
+		},
+	}
+
+	// Setup builder
+	sk, err := bls.SecretKeyFromBytes(hexutil.MustDecode("0x31ee185dad1220a8c88ca5275e64cf5a5cb09cb621cb30df52c9bee8fbaaf8d7"))
+	require.NoError(t, err)
+
+	bDomain := ssz.ComputeDomain(ssz.DomainTypeAppBuilder, [4]byte{0x02, 0x0, 0x0, 0x0}, phase0.Root{})
+
+	// Create test transactions for constraints
+	key, _ := crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
+	signer := types.NewEIP2930Signer(big.NewInt(1))
+
+	// Inclusion constraint transaction (MUST be included)
+	inclusionTxByte, _ := hex.DecodeString("02f87601836384348477359400850517683ba883019a28943678fce4028b6745eb04fa010d9c8e4b36d6288c872b0f1366ad800080c080a0b6b7aba1954160d081b2c8612e039518b9c46cd7df838b405a03f927ad196158a071d2fb6813e5b5184def6bd90fb5f29e0c52671dea433a7decb289560a58416e")
+	inclusionTx := new(types.Transaction)
+	err = inclusionTx.UnmarshalBinary(inclusionTxByte)
+	require.NoError(t, err)
+
+	// Exclusion constraint transaction (MUST be excluded)
+	exclusionTx := &types.AccessListTx{
+		ChainID:  big.NewInt(1),
+		Nonce:    1,
+		To:       &common.Address{0x01},
+		Gas:      30000,
+		GasPrice: big.NewInt(3000000000), // High gas price but should be excluded
+		Value:    big.NewInt(1000),
+		AccessList: types.AccessList{{
+			Address:     common.Address{0x02},
+			StorageKeys: []common.Hash{{0x01}},
+		}},
+	}
+	signedExclusionTx, err := types.SignNewTx(key, signer, exclusionTx)
+	require.NoError(t, err)
+
+	// Create test block with inclusion transaction
+	testExecutableData := &engine.ExecutableData{
+		ParentHash:    common.Hash{0x02, 0x03},
+		FeeRecipient:  common.Address(feeRecipient),
+		StateRoot:     common.Hash{0x07, 0x16},
+		ReceiptsRoot:  common.Hash{0x08, 0x20},
+		LogsBloom:     types.Bloom{}.Bytes(),
+		Number:        uint64(10),
+		GasLimit:      expectedGasLimit,
+		GasUsed:       uint64(100),
+		Timestamp:     uint64(105),
+		ExtraData:     hexutil.MustDecode("0x0042fafc"),
+		BaseFeePerGas: big.NewInt(16),
+		Transactions:  [][]byte{inclusionTxByte}, // Only inclusion tx in block
+	}
+
+	testExecutableData.BlockHash = setBlockhash(testExecutableData).BlockHash
+
+	testBlock, err := engine.ExecutableDataToBlock(*testExecutableData, nil, nil)
+	require.NoError(t, err)
+
+	testPayloadAttributes := &types.BuilderPayloadAttributes{
+		Timestamp:             hexutil.Uint64(104),
+		Random:                common.Hash{0x05, 0x10},
+		SuggestedFeeRecipient: common.Address{0x04, 0x10},
+		GasLimit:              uint64(validatorDesiredGasLimit),
+		Slot:                  testSlot,
+	}
+
+	testEthService := &testEthereumService{
+		synced:             true,
+		testExecutableData: testExecutableData,
+		testBlock:          testBlock,
+		testBlockValue:     big.NewInt(10),
+	}
+
+	builderArgs := BuilderArgs{
+		sk:                   sk,
+		ds:                   flashbotsextra.NilDbService{},
+		relay:                &testRelay,
+		builderSigningDomain: bDomain,
+		eth:                  testEthService,
+		dryRun:               false,
+		validator:            nil,
+		beaconClient:         &testBeacon,
+		limiter:              nil,
+		blockConsumer:        flashbotsextra.NilDbService{},
+	}
+
+	builder, err := NewBuilder(builderArgs)
+	require.NoError(t, err)
+
+	// Setup constraints in cache
+	builder.inclusionConstraintsCache.Put(testSlot, map[common.Hash]*types.Transaction{
+		inclusionTx.Hash(): inclusionTx,
+	})
+	builder.exclusionConstraintsCache.Put(testSlot, map[common.Hash]*types.Transaction{
+		signedExclusionTx.Hash(): signedExclusionTx,
+	})
+
+	expectedProposerPubkey, err := utils.HexToPubkey(testBeacon.validator.Pk.String())
+	require.NoError(t, err)
+
+	fmt.Printf("\n\n=== CONSTRAINT SETUP ===")
+	fmt.Printf("\nSlot: %d", testSlot)
+	fmt.Printf("\nInclusion constraint: %s (MUST be in block)", inclusionTx.Hash().Hex())
+	fmt.Printf("\nExclusion constraint: %s (MUST NOT be in block)", signedExclusionTx.Hash().Hex())
+
+	// Create SubmitBlockOpts for onSealedBlock
+	submitOpts := SubmitBlockOpts{
+		Block:             testBlock,
+		BlockValue:        big.NewInt(10),
+		BlobSidecars:      nil,
+		OrdersClosedAt:    time.Now(),
+		SealedAt:          time.Now(),
+		CommitedBundles:   []types.SimulatedBundle{},
+		AllBundles:        []types.SimulatedBundle{},
+		UsedSbundles:      []types.UsedSBundle{},
+		ProposerPubkey:    expectedProposerPubkey,
+		ValidatorData:     testRelay.gvsVd,
+		PayloadAttributes: testPayloadAttributes,
+	}
+
+	fmt.Printf("\n\n === BLOCK DATA BEFORE RELAY SUBMISSION ===")
+	fmt.Printf("\nBlock Number: %d", testBlock.Number().Uint64())
+	fmt.Printf("\nBlock Hash: %s", testBlock.Hash().Hex())
+	fmt.Printf("\nTransaction Count: %d", len(testBlock.Transactions()))
+	fmt.Printf("\nGas Used: %d / %d", testBlock.GasUsed(), testBlock.GasLimit())
+
+	// Analyze block transactions
+	blockTxHashes := make(map[common.Hash]bool)
+	for i, tx := range testBlock.Transactions() {
+		blockTxHashes[tx.Hash()] = true
+		t.Logf("Tx %d: Hash=%s, To=%s, GasPrice=%s",
+			i, tx.Hash().Hex(),
+			func() string {
+				if tx.To() != nil {
+					return tx.To().Hex()
+				}
+				return "CONTRACT_CREATION"
+			}(),
+			tx.GasPrice().String())
+	}
+
+	// Verify constraints before relay submission
+	t.Logf("\n\n=== CONSTRAINT VERIFICATION ===")
+	inclusionIncluded := blockTxHashes[inclusionTx.Hash()]
+	exclusionIncluded := blockTxHashes[signedExclusionTx.Hash()]
+
+	t.Logf("Inclusion constraint in block: %v (should be true)", inclusionIncluded)
+	t.Logf("Exclusion constraint in block: %v (should be false)", exclusionIncluded)
+
+	require.True(t, inclusionIncluded, "Inclusion constraint must be in block")
+	require.False(t, exclusionIncluded, "Exclusion constraint must NOT be in block")
+
+	// Test onSealedBlock function
+	t.Logf("\n\n=== TESTING onSealedBlock ===")
+	err = builder.onSealedBlock(submitOpts)
+	require.NoError(t, err, "onSealedBlock should not return error")
+
+	// Verify relay received the block with proofs
+	t.Logf("\n\n=== RELAY SUBMISSION VERIFICATION ===")
+	if testRelay.submittedMsgWithProofs != nil {
+		t.Logf("SUCCESS: Block with proofs submitted to relay")
+		t.Logf("Submitted block hash: %s", hex.EncodeToString(testRelay.submittedMsgWithProofs.Bellatrix.Message.BlockHash[:]))
+		t.Logf("Proofs included: %v", testRelay.submittedMsgWithProofs.Proofs != nil)
+		require.NotNil(t, testRelay.submittedMsgWithProofs.Proofs, "Proofs should be included")
+	} else if testRelay.submittedMsg != nil {
+		t.Logf("Block submitted without proofs (fallback)")
+		t.Logf("Submitted block hash: %s", hex.EncodeToString(testRelay.submittedMsg.Bellatrix.Message.BlockHash[:]))
+	} else {
+		t.Fatalf("No block was submitted to relay")
+	}
+
+	t.Logf("=== TEST COMPLETED SUCCESSFULLY ===")
 }

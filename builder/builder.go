@@ -330,7 +330,7 @@ func (b *Builder) subscribeToRelayForConstraints(relayBaseEndpoint string) error
 		}
 
 		defer resp.Body.Close()
-		log.Info(fmt.Sprintf("Connected to SSE server: %s", relayBaseEndpoint))
+		fmt.Printf("Connected to SSE server: %s", relayBaseEndpoint)
 		// Reset subscribing attempts
 		attempts = 0
 
@@ -380,16 +380,16 @@ func (b *Builder) subscribeToRelayForConstraints(relayBaseEndpoint string) error
 				continue
 			}
 
-			log.Info(fmt.Sprintf("Received %d new constraints", len(constraintsSigned)))
+			fmt.Printf("Received %d new constraints", len(constraintsSigned))
 
 			for _, constraint := range constraintsSigned {
 
-				log.Info(fmt.Sprintf("[🔍 CONSTRAINT] Slot=%d, Top=%v, TxCount=%d",   
-				constraint.Message.Slot, constraint.Message.Top, len(constraint.Message.Transactions)))  
-				for i, tx := range constraint.Message.Transactions {  
-					log.Info(fmt.Sprintf("[🔍 TX Info] Slot=%d, Top=%v, TxIndex=%d, Hash=%s",   
-						constraint.Message.Slot, constraint.Message.Top, i, tx.Hash().Hex()))  
-				}  
+				fmt.Printf("\n[🔍 CONSTRAINT] Slot=%d, Top=%v, TxCount=%d",
+					constraint.Message.Slot, constraint.Message.Top, len(constraint.Message.Transactions))
+				for i, tx := range constraint.Message.Transactions {
+					fmt.Printf("\n[🔍 TX Info] Slot=%d, Top=%v, TxIndex=%d, Hash=%s",
+						constraint.Message.Slot, constraint.Message.Top, i, tx.Hash().Hex())
+				}
 				if b.verifyConstraints {
 					found := false
 					for _, pubkey := range b.slotConstraintsPubkeys {
@@ -408,9 +408,8 @@ func (b *Builder) subscribeToRelayForConstraints(relayBaseEndpoint string) error
 						log.Error("Failed to verify constraint signature", "err", err)
 						continue
 					}
-					
+
 				}
-				
 
 				decodedConstraints, err := DecodeConstraints(constraint)
 				if err != nil {
@@ -418,39 +417,55 @@ func (b *Builder) subscribeToRelayForConstraints(relayBaseEndpoint string) error
 					continue
 				}
 
-				log.Info(fmt.Sprintf("[🔍 DECODE DEBUG] Decoded constraint: slot=%d, top=%v, txCount=%d", constraint.Message.Slot, constraint.Message.Top, len(decodedConstraints)))  
+				fmt.Printf("\n[🔍 DECODE DEBUG] Decoded constraint: slot=%d, top=%v, txCount=%d", constraint.Message.Slot, constraint.Message.Top, len(decodedConstraints))
 				// Take the lock to update the constraints cache: both `Get` and `Put` must be done by the same entity
 				b.updateConstraintsCacheLock.Lock()
+				slot := constraint.Message.Slot
 				if constraint.Message.Top {
-					// Inclusion constraint
-					log.Info(fmt.Sprintf("[🔍 CACHE] Storing INCLUSION constraint: Slot=%d, TxCount=%d",constraint.Message.Slot, len(decodedConstraints)))  
+					// Inclusion 경로
+					beforeInc, _ := b.inclusionConstraintsCache.Get(slot)
+					beforeExc, _ := b.exclusionConstraintsCache.Get(slot)
+					fmt.Printf("\n[CACHE BEFORE] slot=%d inc_len=%d inc_ptr=%p exc_len=%d exc_ptr=%p",
+						slot, len(beforeInc), beforeInc, len(beforeExc), beforeExc)
 
-					slotConstraints, _ := b.inclusionConstraintsCache.Get(constraint.Message.Slot)
+					slotConstraints, _ := b.inclusionConstraintsCache.Get(slot)
 					if len(slotConstraints) == 0 {
-						b.inclusionConstraintsCache.Put(constraint.Message.Slot, decodedConstraints)
+						b.inclusionConstraintsCache.Put(slot, decodedConstraints)
 					} else {
-						for hash := range decodedConstraints {
-							log.Info(fmt.Sprintf("[🔍 CACHE] Adding INCLUSION constraint hash: %s", hash.Hex()))  
-							slotConstraints[hash] = decodedConstraints[hash]
+						for h := range decodedConstraints {
+							slotConstraints[h] = decodedConstraints[h]
 						}
-						b.inclusionConstraintsCache.Put(constraint.Message.Slot, slotConstraints)
+						b.inclusionConstraintsCache.Put(slot, slotConstraints)
 					}
+
+					afterInc, _ := b.inclusionConstraintsCache.Get(slot)
+					afterExc, _ := b.exclusionConstraintsCache.Get(slot)
+					fmt.Printf("\n[CACHE AFTER][INCLUSION] slot=%d inc_len=%d inc_ptr=%p exc_len=%d exc_ptr=%p",
+						slot, len(afterInc), afterInc, len(afterExc), afterExc)
 				} else {
-					// Exclusion constraint
-					log.Info(fmt.Sprintf("[🔍 CACHE] Storing EXCLUSION constraint: Slot=%d, TxCount=%d",constraint.Message.Slot, len(decodedConstraints)))  
-					slotConstraints, _ := b.exclusionConstraintsCache.Get(constraint.Message.Slot)
+					// Exclusion 경로
+					beforeInc, _ := b.inclusionConstraintsCache.Get(slot)
+					beforeExc, _ := b.exclusionConstraintsCache.Get(slot)
+					fmt.Printf("\n[CACHE BEFORE] slot=%d inc_len=%d inc_ptr=%p exc_len=%d exc_ptr=%p",
+						slot, len(beforeInc), beforeInc, len(beforeExc), beforeExc)
+
+					slotConstraints, _ := b.exclusionConstraintsCache.Get(slot)
 					if len(slotConstraints) == 0 {
-						b.exclusionConstraintsCache.Put(constraint.Message.Slot, decodedConstraints)
+						b.exclusionConstraintsCache.Put(slot, decodedConstraints)
 					} else {
-						for hash := range decodedConstraints {
-							log.Info(fmt.Sprintf("[🔍 CACHE] Adding EXCLUSION constraint hash: %s", hash.Hex()))  
-							slotConstraints[hash] = decodedConstraints[hash]
+						for h := range decodedConstraints {
+							slotConstraints[h] = decodedConstraints[h]
 						}
-						b.exclusionConstraintsCache.Put(constraint.Message.Slot, slotConstraints)
+						b.exclusionConstraintsCache.Put(slot, slotConstraints)
 					}
+
+					afterInc, _ := b.inclusionConstraintsCache.Get(slot)
+					afterExc, _ := b.exclusionConstraintsCache.Get(slot)
+					fmt.Printf("\n[CACHE AFTER][EXCLUSION] slot=%d inc_len=%d inc_ptr=%p exc_len=%d exc_ptr=%p",
+						slot, len(afterInc), afterInc, len(afterExc), afterExc)
 				}
 				b.updateConstraintsCacheLock.Unlock()
-				
+
 			}
 		}
 	}
@@ -515,7 +530,7 @@ func (b *Builder) onSealedBlock(opts SubmitBlockOpts) error {
 
 	// BOLT: fetch constraints from the cache, which is automatically updated by the SSE subscription
 	inclusionConstraints, _ := b.inclusionConstraintsCache.Get(opts.PayloadAttributes.Slot)
-	log.Info(fmt.Sprintf("[BOLT]: Found %d inclusionConstraints for slot %d", len(inclusionConstraints), opts.PayloadAttributes.Slot))
+	fmt.Printf("🧱 Found %d inclusionConstraints for slot %d", len(inclusionConstraints), opts.PayloadAttributes.Slot)
 
 	if len(inclusionConstraints) > 0 {
 		message := fmt.Sprintf("sealing block %d with %d inclusionConstraints", opts.Block.Number(), len(inclusionConstraints))
@@ -523,7 +538,7 @@ func (b *Builder) onSealedBlock(opts SubmitBlockOpts) error {
 
 		inclusionProof, _, err := CalculateMerkleMultiProofs(opts.Block.Transactions(), inclusionConstraints)
 		if err != nil {
-			log.Error("[BOLT]: could not calculate merkle multiproofs", "err", err)
+			log.Error("🧱 could not calculate merkle multiproofs", "err", err)
 			return err
 		}
 
@@ -549,7 +564,7 @@ func (b *Builder) onSealedBlock(opts SubmitBlockOpts) error {
 		// NOTE: we can ignore constraints for `processBuiltBlock`
 		go b.processBuiltBlock(opts.Block, opts.BlockValue, opts.OrdersClosedAt, opts.SealedAt, opts.CommitedBundles, opts.AllBundles, opts.UsedSbundles, &blockBidMsg)
 		if versionedBlockRequestWithConstraintProofs != nil {
-			log.Info(fmt.Sprintf("[BOLT]: Sending sealed block %d with proofs to relay", opts.Block.Number()))
+			fmt.Printf("\n[BOLT]: Sending sealed block %d with proofs to relay", opts.Block.Number())
 			err = b.relay.SubmitBlockWithProofs(versionedBlockRequestWithConstraintProofs, opts.ValidatorData)
 		} else if len(inclusionConstraints) == 0 {
 			// If versionedBlockRequestWithConstraintsProofs is nil and no constraints, then we don't have proofs to send

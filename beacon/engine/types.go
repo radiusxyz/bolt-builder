@@ -29,6 +29,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto/kzg4844"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/trie"
 )
 
@@ -241,12 +242,46 @@ func ExecutableDataToBlock(params ExecutableData, versionedHashes []common.Hash,
 		h := types.DeriveSha(types.Withdrawals(params.Withdrawals), trie.NewStackTrie(nil))
 		withdrawalsRoot = &h
 	}
+
+	// 계산된 TxHash 로그 추가
+	calculatedTxHash := types.DeriveSha(types.Transactions(txs), trie.NewStackTrie(nil))
+	fmt.Printf("\n=== BLOCK HASH DEBUG ===")
+	fmt.Println("\nExecutableData values:",
+		"\nParentHash", params.ParentHash.Hex(),
+		"\nFeeRecipient", params.FeeRecipient.Hex(),
+		"\nStateRoot", params.StateRoot.Hex(),
+		"\nReceiptsRoot", params.ReceiptsRoot.Hex(),
+		"\nNumber", params.Number,
+		"\nGasLimit", params.GasLimit,
+		"\nGasUsed", params.GasUsed,
+		"\nTimestamp", params.Timestamp,
+		"\nBaseFeePerGas", params.BaseFeePerGas,
+		"\nRandom", params.Random.Hex(),
+		"\nExtraData", hexutil.Encode(params.ExtraData),
+		"\nExpectedBlockHash", params.BlockHash.Hex())
+
+	fmt.Println("\nCalculated values:",
+		"\nTxHash", calculatedTxHash.Hex(),
+		"\nWithdrawalsRoot", func() string {
+			if withdrawalsRoot != nil {
+				return withdrawalsRoot.Hex()
+			}
+			return "nil"
+		}(),
+		"\nBeaconRoot", func() string {
+			if beaconRoot != nil {
+				return beaconRoot.Hex()
+			}
+			return "nil"
+		}(),
+		"\nTransactionCount", len(txs))
+
 	header := &types.Header{
 		ParentHash:       params.ParentHash,
 		UncleHash:        types.EmptyUncleHash,
 		Coinbase:         params.FeeRecipient,
 		Root:             params.StateRoot,
-		TxHash:           types.DeriveSha(types.Transactions(txs), trie.NewStackTrie(nil)),
+		TxHash:           calculatedTxHash,
 		ReceiptHash:      params.ReceiptsRoot,
 		Bloom:            types.BytesToBloom(params.LogsBloom),
 		Difficulty:       common.Big0,
@@ -262,9 +297,55 @@ func ExecutableDataToBlock(params ExecutableData, versionedHashes []common.Hash,
 		BlobGasUsed:      params.BlobGasUsed,
 		ParentBeaconRoot: beaconRoot,
 	}
+
+	// 헤더 필드별 상세 로그
+	fmt.Println("\nHeader fields:",
+		"\nParentHash", header.ParentHash.Hex(),
+		"\nUncleHash", header.UncleHash.Hex(),
+		"\nCoinbase", header.Coinbase.Hex(),
+		"\nRoot", header.Root.Hex(),
+		"\nTxHash", header.TxHash.Hex(),
+		"\nReceiptHash", header.ReceiptHash.Hex(),
+		"\nDifficulty", header.Difficulty.String(),
+		"\nNumber", header.Number.String(),
+		"\nGasLimit", header.GasLimit,
+		"\nGasUsed", header.GasUsed,
+		"\nTime", header.Time,
+		"\nBaseFee", func() string {
+			if header.BaseFee != nil {
+				return header.BaseFee.String()
+			}
+			return "nil"
+		}(),
+		"\nExtra", hexutil.Encode(header.Extra),
+		"\nMixDigest", header.MixDigest.Hex())
+
 	block := types.NewBlockWithHeader(header).WithBody(txs, nil /* uncles */).WithWithdrawals(params.Withdrawals)
-	if block.Hash() != params.BlockHash {
-		return nil, fmt.Errorf("blockhash mismatch, want %x, got %x", params.BlockHash, block.Hash())
+	actualBlockHash := block.Hash()
+
+	fmt.Println("\nBlock hash comparison:",
+		"\nExpected", params.BlockHash.Hex(),
+		"\nActual", actualBlockHash.Hex(),
+		"\nMatch", actualBlockHash == params.BlockHash)
+
+	// 트랜잭션별 상세 정보
+	for i, tx := range txs {
+		fmt.Printf(fmt.Sprintf("Transaction %d:", i),
+			"\nHash", tx.Hash().Hex(),
+			"\nType", tx.Type(),
+			"\nNonce", tx.Nonce(),
+			"\nGasPrice", tx.GasPrice().String(),
+			"\nGas", tx.Gas(),
+			"\nValue", tx.Value().String())
+	}
+
+	if actualBlockHash != params.BlockHash {
+		log.Error("\nBLOCKHASH MISMATCH DETECTED",
+			"\nwant", params.BlockHash.Hex(),
+			"\ngot", actualBlockHash.Hex(),
+			"\ntxCount", len(txs),
+			"\nwithdrawalsCount", len(params.Withdrawals))
+		return nil, fmt.Errorf("\nblockhash mismatch, want %x, got %x", params.BlockHash, actualBlockHash)
 	}
 	return block, nil
 }
