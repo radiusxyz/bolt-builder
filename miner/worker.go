@@ -329,6 +329,7 @@ func newWorker(config *Config, chainConfig *params.ChainConfig, engine consensus
 	}
 	// Subscribe for transaction insertion events (whether from network or resurrects)
 	worker.txsSub = eth.TxPool().SubscribeTransactions(worker.txsCh, true)
+
 	// Subscribe events for blockchain
 	worker.chainHeadSub = eth.BlockChain().SubscribeChainHeadEvent(worker.chainHeadCh)
 
@@ -608,6 +609,7 @@ func (w *worker) mainLoop() {
 
 	for {
 		select {
+
 		case req := <-w.newWorkCh:
 			// Don't start if the work has already been interrupted
 			if req.interrupt == nil || req.interrupt.Load() == commitInterruptNone {
@@ -615,6 +617,10 @@ func (w *worker) mainLoop() {
 			}
 
 		case req := <-w.getWorkCh:
+			// 	inclusionConstraint, _ := req.params.inclusionConstraintsCache.Get(req.params.slot)
+			// exclusionConstraint, _ := req.params.exclusionConstraintsCache.Get(req.params.slot)
+			// fmt.Printf("\n⭐️ Inclusion constraint detail: hash=%v constraint\n", inclusionConstraint)
+			// fmt.Printf("\n⭐️ Exclusion constraint detail: hash=%v constraint\n", exclusionConstraint)
 			req.result <- w.generateWork(req.params)
 
 		case ev := <-w.txsCh:
@@ -1385,19 +1391,19 @@ func (w *worker) fillTransactionsSelectAlgo(interrupt *atomic.Int32, env *enviro
 		err             error
 	)
 
-	fmt.Printf("[🐛 DEBUG] fillTransactionsSelectAlgo: inclusion=%d, exclusion=%d, slot=%d",   
-        len(inclusionConstraints), len(exclusionConstraints), slot)
+	fmt.Printf("\n[🐛 DEBUG] fillTransactionsSelectAlgo: inclusion=%d, exclusion=%d, slot=%d",
+		len(inclusionConstraints), len(exclusionConstraints), slot)
 
 	if len(exclusionConstraints) > 0 {
-		fmt.Printf("[🐛 DEBUG] Taking fillTransactionsWithTimeConstraints path")  
+		fmt.Printf("\n[🐛 DEBUG] Taking fillTransactionsWithTimeConstraints path")
 		return w.fillTransactionsWithTimeConstraints(interrupt, env,
 			inclusionConstraints, exclusionConstraints, inclusionConstraintDetectionTime)
 	} else if len(inclusionConstraints) > 0 {
 		// inclusion only - We assume that inclusion is valid if exclusion has been detected in advance
-		fmt.Printf("[🐛 DEBUG] Taking fillTransactionsAlgoWorker path (inclusion only)")  
+		fmt.Printf("\n[🐛 DEBUG] Taking fillTransactionsAlgoWorker path (inclusion only)")
 		blockBundles, allBundles, mempoolTxHashes, err = w.fillTransactions(interrupt, env, inclusionConstraints)
 	} else {
-		fmt.Printf("[🐛 DEBUG] Taking fillTransactionsAlgoWorker path (no constraints)") 
+		fmt.Printf("\n[🐛 DEBUG] Taking fillTransactionsAlgoWorker path (no constraints)")
 		return w.fillTransactionsAlgoWorker(interrupt, env)
 	}
 
@@ -1423,7 +1429,7 @@ func (w *worker) fillTransactionsWithTimeConstraints(interrupt *atomic.Int32, en
 
 	// Add constraint hashes to mempool hashes
 	for hash := range inclusionConstraints {
-		fmt.Printf("[🐛 DEBUG] Adding constraint hash to mempool: %s", hash.Hex())
+		fmt.Printf("\n[🐛 DEBUG] Adding constraint hash to mempool: %s", hash.Hex())
 		mempoolTxHashes[hash] = struct{}{}
 	}
 	// for hash := range exclusionConstraints {
@@ -1616,7 +1622,7 @@ func mergeTxMaps(map1, map2 map[common.Address][]*txpool.LazyTransaction) map[co
 // into the given sealing block. The transaction selection and ordering strategy can
 // be customized with the plugin in the future.
 func (w *worker) fillTransactions(interrupt *atomic.Int32, env *environment, constraints types.HashToConstraintDecoded) ([]types.SimulatedBundle, []types.SimulatedBundle, map[common.Hash]struct{}, error) {
-	log.Info(fmt.Sprintf("Filling transactions with %d constraints:", len(constraints)))
+	log.Info(fmt.Sprintf("\nFilling transactions with %d constraints:", len(constraints)))
 	w.mu.RLock()
 	tip := w.tip
 	w.mu.RUnlock()
@@ -1635,7 +1641,7 @@ func (w *worker) fillTransactions(interrupt *atomic.Int32, env *environment, con
 	// NOTE: as done with builder txs, we need to fill mempoolTxHashes with the constraints hashes
 	// in order to pass block validation
 	for hash := range constraints {
-		fmt.Printf("[🐛 DEBUG] Adding constraint hash to mempool: %s", hash.Hex())
+		fmt.Printf("\n[🐛 DEBUG] Adding constraint hash to mempool: %s", hash.Hex())
 		mempoolTxHashes[hash] = struct{}{}
 	}
 
@@ -1656,11 +1662,11 @@ func (w *worker) fillTransactions(interrupt *atomic.Int32, env *environment, con
 
 	for _, tx := range constraints {
 		from, err := types.Sender(env.signer, tx)
-		log.Info(fmt.Sprintf("Inside fillTransactions, constraint %s from %s", tx.Hash().String(), from.String()))
+		log.Info(fmt.Sprintf("\nInside fillTransactions, constraint %s from %s", tx.Hash().String(), from.String()))
 		if err != nil {
 			// NOTE: is this the right behaviour? If this happens the builder is not able to
 			// produce a valid bid
-			log.Error("Failed to recover sender from constraint. Skipping constraint", "err", err)
+			log.Error("\nFailed to recover sender from constraint. Skipping constraint", "err", err)
 			continue
 		}
 
@@ -1905,6 +1911,10 @@ func (w *worker) generateWork(params *generateParams) *newPayloadResult {
 	validatorCoinbase := params.coinbase
 	// Set builder coinbase to be passed to beacon header
 	params.coinbase = w.coinbase
+	inclusionConstraint, _ := params.inclusionConstraintsCache.Get(params.slot)
+	exclusionConstraint, _ := params.exclusionConstraintsCache.Get(params.slot)
+	fmt.Printf("\n⭐️ Inclusion constraint detail: hash=%v constraint\n", inclusionConstraint)
+	fmt.Printf("\n⭐️ Exclusion constraint detail: hash=%v constraint\n", exclusionConstraint)
 
 	work, err := w.prepareWork(params)
 	if err != nil {
@@ -1982,14 +1992,14 @@ func (w *worker) generateWork(params *generateParams) *newPayloadResult {
 		exclusionConstraints, _ = params.exclusionConstraintsCache.Get(params.slot)
 	}
 
-	log.Info(fmt.Sprintf("%d inclusion and %d exclusion constraints for slot %d",
-		len(inclusionConstraints), len(exclusionConstraints), params.slot))
+	fmt.Printf("%d inclusion and %d exclusion constraints for slot %d",
+		len(inclusionConstraints), len(exclusionConstraints), params.slot)
 
 	for h, c := range inclusionConstraints {
-		fmt.Printf("⭐️ Inclusion constraint detail: hash=%v constraint=%v\n", h, c)
+		fmt.Printf("\n⭐️ Inclusion constraint detail: hash=%v constraint=%v\n", h, c)
 	}
 	for h, c := range exclusionConstraints {
-		fmt.Printf("⭐️ Exclusion constraint detail: hash=%v constraint=%v\n", h, c)
+		fmt.Printf("\n⭐️ Exclusion constraint detail: hash=%v constraint=%v\n", h, c)
 	}
 
 	blockBundles, allBundles, usedSbundles, mempoolTxHashes, err := w.fillTransactionsSelectAlgo(
@@ -2012,7 +2022,7 @@ func (w *worker) generateWork(params *generateParams) *newPayloadResult {
 	// in order to pass block validation. Otherwise the constraints will be rejected as unknown
 	// because they not part of the mempool and not part of the known bundles
 	for hash := range inclusionConstraints {
-		log.Info(fmt.Sprintf("[🐛 DEBUG] Adding constraint hash to mempool: %s", hash.Hex()))  
+		log.Info(fmt.Sprintf("[🐛 DEBUG] Adding constraint hash to mempool: %s", hash.Hex()))
 		mempoolTxHashes[hash] = struct{}{}
 	}
 
@@ -2625,7 +2635,7 @@ func (w *worker) proposerTxCommit(env *environment, validatorCoinbase *common.Ad
 	w.mu.Unlock()
 	builderBalance := env.state.GetBalance(sender).ToBig()
 
-	log.Info(fmt.Sprintf("[BOLT]: builderBalance %v, reserve.builderBalance %v", builderBalance, reserve.builderBalance))
+	fmt.Printf("\n[BOLT]: builderBalance %v, reserve.builderBalance %v", builderBalance, reserve.builderBalance)
 
 	availableFunds := new(big.Int).Sub(builderBalance, reserve.builderBalance)
 	if availableFunds.Sign() <= 0 {
